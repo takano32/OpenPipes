@@ -42,6 +42,14 @@ const history = { stack: [], index: 0, savedRev: 0, lastKey: null, rev: 0 };
 // object under the drag handler and the rest of the gesture would be lost
 let interacting = false;
 
+// The canvas is scaled with a CSS transform, so every measurement taken from
+// getBoundingClientRect is in screen pixels and has to be divided by this to
+// get back to the canvas coordinates modules and wires are stored in.
+const ZOOM_STEPS = [0.4, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2];
+const CANVAS_W = 4000;
+const CANVAS_H = 3000;
+let zoom = 1;
+
 const dom = {};
 const cardEls = new Map();  // module id -> card element
 const wireEls = new Map();  // wire id -> svg <g>
@@ -170,6 +178,56 @@ function syncHistoryUI() {
   if (dom.redo) dom.redo.disabled = history.index >= history.stack.length - 1;
 }
 
+/* ---------- zoom ---------- */
+
+// Screen coordinates -> the canvas coordinates modules and wires are stored in.
+function canvasPoint(clientX, clientY) {
+  const c = dom.canvas.getBoundingClientRect();
+  return { x: (clientX - c.left) / zoom, y: (clientY - c.top) / zoom };
+}
+
+// `anchor` is a screen point to keep still, so wheel-zoom pulls toward the
+// cursor instead of the top-left corner.
+function setZoom(next, anchor) {
+  const z = clamp(next, ZOOM_STEPS[0], ZOOM_STEPS[ZOOM_STEPS.length - 1]);
+  if (Math.abs(z - zoom) < 0.001) return;
+  const wrap = dom.canvasWrap;
+  const rect = wrap.getBoundingClientRect();
+  const at = anchor || { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  // where the anchor sits in canvas coordinates, before and after
+  const before = canvasPoint(at.x, at.y);
+
+  zoom = z;
+  dom.canvas.style.transform = `scale(${zoom})`;
+  // the sizer carries the scaled footprint so the scrollbars stay honest
+  dom.canvasSizer.style.width = CANVAS_W * zoom + 'px';
+  dom.canvasSizer.style.height = CANVAS_H * zoom + 'px';
+
+  const after = canvasPoint(at.x, at.y);
+  wrap.scrollLeft += (before.x - after.x) * zoom;
+  wrap.scrollTop += (before.y - after.y) * zoom;
+  dom.zoomLabel.textContent = Math.round(zoom * 100) + '%';
+}
+
+function stepZoom(direction, anchor) {
+  const i = ZOOM_STEPS.findIndex((z) => z > zoom + 0.001);
+  const next = direction > 0
+    ? ZOOM_STEPS[i === -1 ? ZOOM_STEPS.length - 1 : i]
+    : ZOOM_STEPS[Math.max(0, (i === -1 ? ZOOM_STEPS.length : i) - 2)];
+  setZoom(next, anchor);
+}
+
+function bindZoom() {
+  dom.zoomOut.addEventListener('click', () => stepZoom(-1));
+  dom.zoomIn.addEventListener('click', () => stepZoom(1));
+  dom.zoomLabel.addEventListener('click', () => setZoom(1));
+  dom.canvasWrap.addEventListener('wheel', (e) => {
+    if (!e.ctrlKey && !e.metaKey) return; // plain wheel still scrolls
+    e.preventDefault();
+    stepZoom(e.deltaY < 0 ? 1 : -1, { x: e.clientX, y: e.clientY });
+  }, { passive: false });
+}
+
 function toast(message, kind) {
   const t = el('div', { class: 'toast' + (kind === 'error' ? ' error' : ''), text: message });
   dom.toasts.append(t);
@@ -214,6 +272,10 @@ async function init() {
   dom.loadMenu = $('#load-menu');
   dom.undo = $('#btn-undo');
   dom.redo = $('#btn-redo');
+  dom.canvasSizer = $('#canvas-sizer');
+  dom.zoomIn = $('#zoom-in');
+  dom.zoomOut = $('#zoom-out');
+  dom.zoomLabel = $('#zoom-label');
 
   try {
     state.config = await api('/api/config');
@@ -237,6 +299,7 @@ async function init() {
   bindTopbar();
   bindCanvas();
   bindKeys();
+  bindZoom();
   bindDebugger();
   renderPipe();
   resetHistory();
@@ -284,8 +347,8 @@ function bindCanvas() {
     e.preventDefault();
     const type = e.dataTransfer.getData('text/plain');
     if (!state.byType.has(type)) return;
-    const rect = dom.canvas.getBoundingClientRect();
-    addModule(type, Math.round(e.clientX - rect.left) - 130, Math.round(e.clientY - rect.top) - 16);
+    const at = canvasPoint(e.clientX, e.clientY);
+    addModule(type, Math.round(at.x) - 130, Math.round(at.y) - 16);
   });
   // click on empty canvas (or bare wire layer) clears the selection
   dom.canvas.addEventListener('pointerdown', (e) => {
@@ -592,8 +655,8 @@ function startCardDrag(e, mod, card, header) {
   try { header.setPointerCapture(e.pointerId); } catch { /* inactive pointer (synthetic event) */ }
 
   const onMove = (ev) => {
-    const nx = Math.max(0, origX + Math.round(ev.clientX - startX));
-    const ny = Math.max(0, origY + Math.round(ev.clientY - startY));
+    const nx = Math.max(0, origX + Math.round((ev.clientX - startX) / zoom));
+    const ny = Math.max(0, origY + Math.round((ev.clientY - startY) / zoom));
     if (nx === mod.x && ny === mod.y) return;
     mod.x = nx;
     mod.y = ny;
@@ -623,8 +686,7 @@ function portCenter(moduleId, portName, dir) {
     '.port[data-dir="' + dir + '"][data-port="' + CSS.escape(portName) + '"]');
   if (!port) return null;
   const r = port.getBoundingClientRect();
-  const c = dom.canvas.getBoundingClientRect();
-  return { x: r.left + r.width / 2 - c.left, y: r.top + r.height / 2 - c.top };
+  return canvasPoint(r.left + r.width / 2, r.top + r.height / 2);
 }
 
 function bezier(a, b) {
@@ -702,9 +764,8 @@ function startWireDrag(e, moduleId, portName, portEl) {
   let target = null; // highlighted input port element under the pointer
 
   const onMove = (ev) => {
-    const c = dom.canvas.getBoundingClientRect();
     const a = portCenter(moduleId, portName, 'out');
-    if (a) dom.ghost.setAttribute('d', bezier(a, { x: ev.clientX - c.left, y: ev.clientY - c.top }));
+    if (a) dom.ghost.setAttribute('d', bezier(a, canvasPoint(ev.clientX, ev.clientY)));
     const under = document.elementFromPoint(ev.clientX, ev.clientY);
     const hit = under ? under.closest('.port[data-dir="in"]') : null;
     const next = hit && hit.dataset.module !== moduleId ? hit : null;
@@ -763,6 +824,12 @@ function bindKeys() {
   document.addEventListener('keydown', (e) => {
     const z = e.key === 'z' || e.key === 'Z';
     const y = e.key === 'y' || e.key === 'Y';
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '0')) {
+      if (isTextField(document.activeElement)) return;
+      e.preventDefault();
+      if (e.key === '0') setZoom(1); else stepZoom(e.key === '-' ? -1 : 1);
+      return;
+    }
     if ((e.ctrlKey || e.metaKey) && !e.altKey && (z || y)) {
       // inside a text field the browser's own undo must win
       if (isTextField(document.activeElement)) return;

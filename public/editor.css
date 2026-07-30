@@ -253,6 +253,13 @@ button, input, select { font-family: inherit; color: inherit; }
 
 /* ---------- canvas ---------- */
 
+#canvas-area {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
 #canvas-wrap {
   flex: 1;
   min-height: 0;
@@ -260,10 +267,49 @@ button, input, select { font-family: inherit; color: inherit; }
   background: var(--bg);
 }
 
+/* the scaled footprint, so the scrollbars match what zoom is showing */
+#canvas-sizer {
+  width: 4000px;
+  height: 3000px;
+}
+
+#zoom-bar {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  display: flex;
+  align-items: stretch;
+  gap: 1px;
+  padding: 1px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--border);
+  box-shadow: 0 2px 8px rgba(30, 42, 60, 0.14);
+  overflow: hidden;
+  z-index: 5;
+}
+
+.zoom-btn {
+  min-width: 30px;
+  padding: 5px 8px;
+  border: none;
+  background: #fff;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+#zoom-label { min-width: 52px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.zoom-btn:hover { background: #eef4fd; color: var(--accent); }
+
 #canvas {
   position: relative;
   width: 4000px;
   height: 3000px;
+  transform-origin: 0 0;
   background-image: radial-gradient(#c8d0dc 1px, transparent 1.2px);
   background-size: 20px 20px;
 }

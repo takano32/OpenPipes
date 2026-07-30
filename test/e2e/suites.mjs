@@ -285,6 +285,78 @@ export const suites = [
     await page.eval(`document.querySelectorAll('.module-card').length`) === 1);
 }],
 
+/* --------------------------------------------------------------------- zoom */
+// Every coordinate the editor stores is unscaled, while everything
+// getBoundingClientRect reports is scaled, so each conversion is a chance to
+// be off by a factor of the zoom.
+['zoom', async ({ page, origin, check }) => {
+  const label = `document.querySelector('#zoom-label').textContent`;
+  const zoomIn = () => page.eval(`document.querySelector('#zoom-in').click()`);
+  const zoomOut = () => page.eval(`document.querySelector('#zoom-out').click()`);
+  // an IIFE: repeated Runtime.evaluate calls share one global scope, so a
+  // top-level `const` would be a redeclaration the second time round
+  const home = () => page.eval(`(() => { const w = document.querySelector('#canvas-wrap');
+    w.scrollLeft = 0; w.scrollTop = 0; return true; })()`);
+
+  await page.goto(`${origin}/`);
+  check('starts at 100%', (await page.eval(label)) === '100%');
+
+  await zoomOut();
+  check('one step out is 80%', (await page.eval(label)) === '80%');
+  await zoomIn(); await zoomIn();
+  check('two steps in is 125%', (await page.eval(label)) === '125%');
+  check('the canvas is really scaled',
+    (await page.eval(`getComputedStyle(document.querySelector('#canvas')).transform`)).startsWith('matrix(1.25'));
+  check('the sizer grew so the scrollbars stay honest',
+    (await page.eval(`document.querySelector('#canvas-sizer').style.width`)) === '5000px');
+
+  await home();
+  await page.dropModule('item_builder', 500, 300);
+  const dropped = await page.eval(`(() => { const m = document.querySelector('.module-card');
+    const c = document.querySelector('#canvas').getBoundingClientRect();
+    return { left: parseFloat(m.style.left), top: parseFloat(m.style.top),
+             wantX: (500 - c.left) / 1.25 - 130, wantY: (300 - c.top) / 1.25 - 16 }; })()`);
+  check('a drop lands under the pointer while zoomed',
+    Math.abs(dropped.left - dropped.wantX) <= 1 && Math.abs(dropped.top - dropped.wantY) <= 1, dropped);
+
+  // wire two cards placed at 100%, then scaled up
+  await page.goto(`${origin}/`);
+  await home();
+  await page.dropModule('item_builder', 500, 150);
+  await page.dropModule('output', 520, 430);
+  await zoomIn();
+  await home();
+  const p = await page.portPair();
+  await page.drag(p.ox, p.oy, p.ix, p.iy);
+  check('a wire can still be drawn while zoomed', (await page.counts()).wires === 1);
+  check('the wire meets the port in canvas coordinates', await page.eval(`(() => {
+    const d = document.querySelector('#wires g.wire .wire-line').getAttribute('d');
+    const m = d.match(/^M ([\\d.-]+) ([\\d.-]+)/);
+    const o = document.querySelectorAll('.module-card')[0]
+      .querySelector('.port[data-dir="out"]').getBoundingClientRect();
+    const c = document.querySelector('#canvas').getBoundingClientRect();
+    return Math.abs(Number(m[1]) - (o.left + o.width / 2 - c.left) / 1.25) < 1.5
+        && Math.abs(Number(m[2]) - (o.top + o.height / 2 - c.top) / 1.25) < 1.5; })()`));
+
+  const pos = `parseFloat(document.querySelectorAll('.module-card')[1].style.left)`;
+  const before = await page.eval(pos);
+  const head = await page.eval(`(() => { const r = document.querySelectorAll('.module-card')[1]
+    .querySelector('.card-header').getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await page.drag(head.x, head.y, head.x + 125, head.y);
+  const after = await page.eval(pos);
+  check('125 screen pixels of drag move a card 100 canvas pixels',
+    Math.abs((after - before) - 100) <= 2, { before, after });
+
+  await page.eval(`document.querySelector('#zoom-label').click()`);
+  check('clicking the readout returns to 100%', (await page.eval(label)) === '100%');
+
+  for (let i = 0; i < 10; i++) await zoomIn();
+  check('zoom stops at the top of the range', (await page.eval(label)) === '200%');
+  for (let i = 0; i < 12; i++) await zoomOut();
+  check('zoom stops at the bottom of the range', (await page.eval(label)) === '40%');
+}],
+
 /* --------------------------------------------------------- saved pipe list */
 ['saved pipes', async ({ page, origin, check }) => {
   await page.goto(`${origin}/`);

@@ -29,12 +29,21 @@
 <main id="workspace">
   <aside id="palette"></aside>
   <section id="center">
-    <div id="canvas-wrap">
-      <div id="canvas">
-        <svg id="wires" width="4000" height="3000" xmlns="http://www.w3.org/2000/svg">
-          <path id="ghost-wire" class="ghost-wire" d=""></path>
-        </svg>
-        <div id="canvas-hint">左のパレットからモジュールをドラッグして配置し、<br>下側のポートから次のモジュールの上側のポートへ線をつなぎます</div>
+    <div id="canvas-area">
+      <div id="canvas-wrap">
+        <div id="canvas-sizer">
+          <div id="canvas">
+            <svg id="wires" width="4000" height="3000" xmlns="http://www.w3.org/2000/svg">
+              <path id="ghost-wire" class="ghost-wire" d=""></path>
+            </svg>
+            <div id="canvas-hint">左のパレットからモジュールをドラッグして配置し、<br>下側のポートから次のモジュールの上側のポートへ線をつなぎます</div>
+          </div>
+        </div>
+      </div>
+      <div id="zoom-bar">
+        <button id="zoom-out" class="zoom-btn" type="button" title="縮小 (Ctrl+-)" aria-label="縮小">−</button>
+        <button id="zoom-label" class="zoom-btn" type="button" title="100% に戻す (Ctrl+0)">100%</button>
+        <button id="zoom-in" class="zoom-btn" type="button" title="拡大 (Ctrl++)" aria-label="拡大">+</button>
       </div>
     </div>
     <div id="params-strip" hidden></div>

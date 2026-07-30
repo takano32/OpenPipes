@@ -414,8 +414,20 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
   duplicate-id modules, wires whose endpoints don't exist, malformed
   list/rules rows) so a hand-edited file can't leave the canvas broken. Also offers "Open RSS" link to `/pipes/<id>/run` once saved.
   **New**: confirm() when there are unsaved changes.
-- Canvas panning via scrollbars (the canvas inner area is ~4000×3000). Module
-  drag updates wires live. No zoom (keep it robust).
+- Canvas panning via scrollbars (the canvas inner area is 4000×3000). Module
+  drag updates wires live.
+- **Zoom** 40%–200% in fixed steps, via the ─ / % / + control at the bottom
+  right of the canvas, `Ctrl`/`Cmd` + wheel (plain wheel still scrolls), and
+  `Ctrl`/`Cmd` + `+` / `-` / `0`. Clicking the percentage returns to 100%.
+  Implemented as `transform: scale()` with `transform-origin: 0 0` on
+  `#canvas`, wrapped in `#canvas-sizer` whose pixel size is the scaled
+  footprint so the scrollbars keep matching what is on screen. Wheel zoom
+  keeps the point under the cursor still by adjusting the wrapper's scroll.
+  Everything the editor *stores* stays in unscaled canvas coordinates, so
+  every measurement taken from `getBoundingClientRect` is divided by the zoom
+  — `canvasPoint(clientX, clientY)` is the single conversion, used by drops,
+  port centres and the ghost wire, and drag deltas are divided directly. Zoom
+  is a view property: it is not in the undo history and not saved with a pipe.
 - Status toasts (saved / run errors) bottom-right, auto-dismiss.
 - Deep link: `/?pipe=<id>` loads that saved pipe on startup.
 - **Undo / redo** (↶ ↷ buttons plus `Ctrl`/`Cmd`+`Z`, `Ctrl`/`Cmd`+`Shift`+`Z`,
