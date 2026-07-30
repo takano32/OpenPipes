@@ -190,6 +190,47 @@ button, input, select { font-family: inherit; color: inherit; }
 
 .menu-note { padding: 9px 10px; color: var(--muted); font-size: 12px; }
 
+.menu-files {
+  display: flex;
+  gap: 4px;
+  padding: 2px 2px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.menu-file {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fbfcfe;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.menu-file:hover { background: #eef4fd; border-color: var(--accent); color: var(--accent); }
+
+.menu-search {
+  width: 100%;
+  margin: 0 0 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  background: #fff;
+}
+
+.menu-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(47, 128, 237, 0.15);
+}
+
+.menu-item[hidden] { display: none; }
+
 /* ---------- workspace layout ---------- */
 
 #workspace { flex: 1; display: flex; min-height: 0; }

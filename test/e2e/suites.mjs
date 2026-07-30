@@ -38,11 +38,10 @@ export const suites = [
   check('dragging port to port creates a wire', (await page.counts()).wires === 1);
 
   await page.eval(`document.querySelector('#btn-run').click()`);
-  await new Promise((r) => setTimeout(r, 800));
-  check('every card shows its item count', await page.eval(
-    `[...document.querySelectorAll('.badge')].filter(b => !b.hidden && b.textContent === '1').length`) === 2);
+  check('every card shows its item count', await page.until(
+    `[...document.querySelectorAll('.badge')].filter(b => !b.hidden && b.textContent === '1').length === 2`));
   check('the debugger shows the built item',
-    (await page.eval(`document.querySelector('#debugger-body').textContent`)).includes('こんにちは世界'));
+    await page.until(`document.querySelector('#debugger-body').textContent.includes('こんにちは世界')`));
 
   const before = await page.eval(`document.querySelector('#wires g.wire .wire-line').getAttribute('d')`);
   const head = await page.eval(`(() => {
@@ -55,7 +54,7 @@ export const suites = [
 
 /* -------------------------------------------------------------- demo pipes */
 ['demo pipes', async ({ page, origin, check }) => {
-  await page.goto(`${origin}/?pipe=demo-tech-filter`, 1600);
+  await page.goto(`${origin}/?pipe=demo-tech-filter`);
   const c = await page.counts();
   check('the deep link loads the pipe', c.modules === 6 && c.wires === 4, c);
   check('the pipe name is restored',
@@ -66,10 +65,10 @@ export const suites = [
     await page.eval(`document.querySelector('#open-rss').getAttribute('href')`) === '/pipes/demo-tech-filter/run');
 
   await page.eval(`document.querySelector('#btn-run').click()`);
-  await new Promise((r) => setTimeout(r, 1400));
-  const badge = await page.eval(`(() => {
+  const badge = await page.until(`(() => {
     const out = [...document.querySelectorAll('.module-card')].find(c => c.querySelector('.card-header.cat-output'));
-    return out ? out.querySelector('.badge').textContent : null; })()`);
+    const b = out && out.querySelector('.badge');
+    return b && !b.hidden ? b.textContent : null; })()`);
   check('the output count is filtered and truncated',
     badge !== null && Number(badge) > 0 && Number(badge) <= 5, badge);
   check('the debugger lists matching items',
@@ -81,7 +80,7 @@ export const suites = [
     i.dispatchEvent(new Event('input', { bubbles: true }));
     document.querySelector('#btn-run').click();
     return true; })()`);
-  await new Promise((r) => setTimeout(r, 1400));
+  await page.until(`document.querySelector('#debugger-body').textContent.includes('Rust')`);
   const dbg = await page.eval(`document.querySelector('#debugger-body').textContent`);
   check('changing a param changes the result', dbg.includes('Rust') && !dbg.includes('AI Inference'), dbg.slice(0, 120));
 
@@ -175,7 +174,7 @@ export const suites = [
   await page.dropModule('reverse', 900, 200);
   check('a new edit drops the redo tail', (await page.counts()).redoDisabled);
 
-  await page.goto(`${origin}/?pipe=demo-tech-filter`, 1600);
+  await page.goto(`${origin}/?pipe=demo-tech-filter`);
   c = await page.counts();
   check('loading a pipe resets the history', c.modules === 6 && c.undoDisabled && c.redoDisabled, c);
   await page.eval(`(() => { const h = document.querySelector('.module-card .card-header');
@@ -189,9 +188,8 @@ export const suites = [
   check('undo restores it and empties the history again', c.modules === 6 && c.undoDisabled, c);
 
   await page.eval(`document.querySelector('#btn-run').click()`);
-  await new Promise((r) => setTimeout(r, 1400));
   check('the restored pipe still runs',
-    (await page.eval(`document.querySelector('#debugger-body').textContent`)).includes('AI'));
+    await page.until(`document.querySelector('#debugger-body').textContent.includes('AI')`));
 }],
 
 /* ------------------------------------------ history cap and the dirty flag */
@@ -456,7 +454,7 @@ export const suites = [
     }
     return out; })()`);
 
-  await page.goto(`${origin}/?pipe=demo-loop`, 1700);
+  await page.goto(`${origin}/?pipe=demo-loop`);
   // scatter the tidy demo pipe, then ask for it back
   await page.eval(`(() => {
     document.querySelectorAll('.module-card').forEach((c, i) => {
@@ -482,7 +480,7 @@ export const suites = [
     undone['Fetch Feed'].x !== laid['Fetch Feed'].x, { undone, laid });
 
   // user inputs sit beside the flow, not in it
-  await page.goto(`${origin}/?pipe=demo-tech-filter`, 1700);
+  await page.goto(`${origin}/?pipe=demo-tech-filter`);
   await page.eval(`document.querySelector('#btn-layout').click()`);
   await new Promise((r) => setTimeout(r, 400));
   const withInput = await boxes();
@@ -503,11 +501,15 @@ export const suites = [
 
   await page.eval(`window.confirm = () => true`);
   await page.eval(`document.querySelector('#btn-load').click()`);
-  await new Promise((r) => setTimeout(r, 500));
+  const ready = await page.until(
+    `!![...document.querySelectorAll('#load-menu .menu-item')]
+        .find((r) => r.dataset.name === 'デモ: フィードのマージ')`);
+  check('the load menu lists the demo pipe', ready === true);
   await page.eval(`(() => { const rows = [...document.querySelectorAll('#load-menu .menu-item')];
-    const row = rows.find((r) => r.querySelector('.menu-name').textContent === 'デモ: フィードのマージ');
-    row.querySelector('.menu-act').click(); return true; })()`);
-  await new Promise((r) => setTimeout(r, 700));
+    rows.find((r) => r.dataset.name === 'デモ: フィードのマージ')
+      .querySelector('.menu-act').click(); return true; })()`);
+  await page.until(`fetch('/api/pipes').then(r => r.json())
+    .then(l => l.some(p => p.name.endsWith('のコピー')))`);
 
   const names = await listNames();
   check('the copy is saved under its own name',
@@ -520,6 +522,67 @@ export const suites = [
   check('the copy has the same graph', copy.modules.length === 6 && copy.wires.length === 5,
     { modules: copy.modules.length, wires: copy.wires.length });
   check('and a different id', copy.id !== 'demo-merged', copy.id);
+}],
+
+/* ------------------------------------------------- palette click and files */
+['palette click and JSON files', async ({ page, origin, check }) => {
+  await page.goto(`${origin}/`);
+  await page.eval(`[...document.querySelectorAll('.pal-item')]
+    .find((i) => i.textContent.includes('Reverse')).click()`);
+  await new Promise((r) => setTimeout(r, 150));
+  check('clicking a palette item adds it without dragging',
+    (await page.counts()).modules === 1);
+  const where = await page.eval(`(() => { const m = document.querySelector('.module-card');
+    const w = document.querySelector('#canvas-wrap');
+    return { x: parseFloat(m.style.left), viewW: w.clientWidth, scroll: w.scrollLeft }; })()`);
+  check('and puts it where the user is looking',
+    Math.abs(where.x - (where.scroll + where.viewW / 2 - 130)) < 2, where);
+
+  // export writes a file the editor can read back
+  // the anchor click is stubbed out: a real download in headless Chrome needs
+  // Page.setDownloadBehavior and would hang the run waiting for it
+  const exported = await page.eval(`(async () => {
+    let captured = null;
+    const realCreate = URL.createObjectURL;
+    const realClick = HTMLAnchorElement.prototype.click;
+    URL.createObjectURL = (blob) => { captured = blob; return 'blob:stub'; };
+    HTMLAnchorElement.prototype.click = function () {};
+    try {
+      document.querySelector('#btn-load').click();
+      for (let i = 0; i < 100 && !document.querySelector('.menu-file'); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      document.querySelector('.menu-file').click();
+      await new Promise((r) => setTimeout(r, 200));
+      return captured ? await captured.text() : null;
+    } finally {
+      URL.createObjectURL = realCreate;
+      HTMLAnchorElement.prototype.click = realClick;
+    } })()`);
+  const parsed = JSON.parse(exported);
+  check('the export is the pipe as JSON',
+    parsed.modules.length === 1 && parsed.modules[0].type === 'reverse', parsed);
+
+  // and importing one replaces the canvas
+  await page.eval(`window.confirm = () => true`);
+  const imported = await page.eval(`(async () => {
+    const pipe = { name: '取り込んだパイプ', modules: [
+      { id: 'a', type: 'item_builder', params: {}, x: 40, y: 40 },
+      { id: 'b', type: 'output', params: {}, x: 40, y: 300 }],
+      wires: [{ id: 'w', from: { module: 'a', port: 'out' }, to: { module: 'b', port: 'in' } }] };
+    const file = new File([JSON.stringify(pipe)], 'x.json', { type: 'application/json' });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const picker = document.querySelector('#load-menu input[type=file]');
+    picker.files = dt.files;
+    picker.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    return { name: document.querySelector('#pipe-name').value,
+             rss: document.querySelector('#open-rss').hidden }; })()`);
+  const after = await page.counts();
+  check('importing replaces the canvas', after.modules === 2 && after.wires === 1, after);
+  check('and takes the name from the file', imported.name === '取り込んだパイプ', imported);
+  check('an imported pipe is not yet saved on this server', imported.rss === true);
 }],
 
 /* ------------------------------------------------------------------ minimap */
@@ -548,7 +611,7 @@ export const suites = [
   check('a second module and a wire add to it', two > one, { one, two });
 
   // clicking the map scrolls the canvas to that point
-  await page.goto(`${origin}/?pipe=demo-loop`, 1700);
+  await page.goto(`${origin}/?pipe=demo-loop`);
   check('the minimap is shown for a loaded pipe', !(await hidden()));
   const before = await page.eval(`document.querySelector('#canvas-wrap').scrollTop`);
   const target = await page.eval(`(() => { const r = document.querySelector('#minimap').getBoundingClientRect();
@@ -558,9 +621,8 @@ export const suites = [
   check('clicking near the bottom scrolls down', after > before, { before, after });
 
   await page.eval(`document.querySelector('#btn-run').click()`);
-  await new Promise((r) => setTimeout(r, 1500));
   check('the pipe still runs with the minimap up',
-    (await page.eval(`document.querySelector('#debugger-body').textContent`)).includes('OpenPipes Demo'));
+    await page.until(`document.querySelector('#debugger-body').textContent.includes('OpenPipes Demo')`));
 }],
 
 /* --------------------------------------------------------- saved pipe list */
@@ -575,16 +637,18 @@ export const suites = [
     await page.eval(`!document.querySelector('#open-rss').hidden`));
 
   await page.eval(`document.querySelector('#btn-load').click()`);
-  await new Promise((r) => setTimeout(r, 500));
+  await page.until(`[...document.querySelectorAll('#load-menu .menu-name')]
+    .some(n => n.textContent === 'e2e-throwaway')`);
   const names = await page.eval(`[...document.querySelectorAll('#load-menu .menu-name')].map(n => n.textContent)`);
   check('the saved pipe appears in the load menu', names.includes('e2e-throwaway'), names);
 
   const id = await page.eval(`document.querySelector('#open-rss').getAttribute('href').split('/')[2]`);
   await page.eval(`window.confirm = () => true;`);
   await page.eval(`(() => { const rows = [...document.querySelectorAll('#load-menu .menu-item')];
-    const row = rows.find(r => r.querySelector('.menu-name').textContent === 'e2e-throwaway');
-    row.querySelector('.menu-del').click(); return true; })()`);
-  await new Promise((r) => setTimeout(r, 600));
+    rows.find(r => r.dataset.name === 'e2e-throwaway')
+      .querySelector('.menu-del').click(); return true; })()`);
+  await page.until(`fetch('/api/pipes').then(r => r.json())
+    .then(l => !l.some(p => p.name === 'e2e-throwaway'))`);
   const after = await page.eval(`fetch('/api/pipes').then(r => r.json()).then(l => l.map(p => p.id))`);
   check('deleting from the menu removes it server-side', !after.includes(id), { id, after });
   check('the deleted pipe is no longer the open document',

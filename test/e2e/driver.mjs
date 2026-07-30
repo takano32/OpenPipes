@@ -50,9 +50,17 @@ export async function connect(cdpPort) {
       pageErrors.push(String(msg.params.args?.[0]?.value ?? 'console.error'));
     }
   };
-  const send = (method, params = {}) => new Promise((resolve) => {
+  // A command that never comes back should fail the run, not hang it.
+  const send = (method, params = {}, timeoutMs = 30000) => new Promise((resolve, reject) => {
     const id = ++seq;
-    pending.set(id, resolve);
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`CDP ${method} timed out after ${timeoutMs} ms`));
+    }, timeoutMs);
+    pending.set(id, (msg) => {
+      clearTimeout(timer);
+      resolve(msg);
+    });
     ws.send(JSON.stringify({ id, method, params }));
   });
 
@@ -75,9 +83,32 @@ export async function connect(cdpPort) {
       return r.result?.result?.value;
     },
 
-    async goto(url, settleMs = 1300) {
+    // Polls instead of sleeping a fixed amount: a run that takes longer than
+    // usual under load should not read as a failure.
+    async until(expression, { timeoutMs = 8000, every = 100 } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const value = await page.eval(expression);
+        if (value) return value;
+        if (Date.now() > deadline) return value;
+        await sleep(every);
+      }
+    },
+
+    // Waits for the editor to be usable rather than for a fixed time: a
+    // loaded machine can take several seconds to render the palette, and a
+    // deep link has a second round trip to load the pipe.
+    async goto(url) {
       await send('Page.navigate', { url });
-      await sleep(settleMs);
+      const ready = await page.until(
+        `document.querySelectorAll('.pal-item').length > 0`, { timeoutMs: 20000 });
+      if (!ready) throw new Error(`the editor never rendered at ${url}`);
+      if (/[?&]pipe=/.test(url)) {
+        const loaded = await page.until(
+          `document.querySelectorAll('.module-card').length > 0`, { timeoutMs: 20000 });
+        if (!loaded) throw new Error(`the pipe never loaded at ${url}`);
+      }
+      await sleep(120); // let the first render settle before measuring
     },
 
     async key(k, { ctrl = false, shift = false } = {}) {

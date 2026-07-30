@@ -31,7 +31,12 @@ function spawnQuiet(cmd, args, env) {
   return { child, log };
 }
 
+// Chromium can take well over ten seconds to print its DevTools line on a
+// loaded machine, so this waits a minute before giving up — and says which
+// of the two things went wrong, since "not installed" and "did not start"
+// need completely different fixes.
 async function startBrowser(port) {
+  const missing = [];
   for (const bin of chromeCandidates()) {
     const { child, log } = spawnQuiet(bin, [
       '--headless=new', '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
@@ -39,16 +44,20 @@ async function startBrowser(port) {
     ]);
     try {
       await waitFor(`${bin} devtools`, async () =>
-        (await fetch(`http://127.0.0.1:${port}/json/version`)).ok, { tries: 40 });
+        (await fetch(`http://127.0.0.1:${port}/json/version`)).ok, { tries: 240 });
       return { child, bin };
-    } catch {
+    } catch (err) {
       child.kill('SIGKILL');
-      if (log.join('').includes('ENOENT')) continue;
+      if (child.exitCode !== null || log.join('').includes('ENOENT')) {
+        missing.push(bin);
+        continue;
+      }
+      throw new Error(`${bin} never became ready:\n${log.join('').slice(-800)}`);
     }
   }
   throw new Error(
-    'no usable Chromium found — tried: ' + chromeCandidates().join(', ') +
-    '. Install chromium or set CHROME_BIN.');
+    'no usable browser found — tried: ' + missing.join(', ') +
+    '. Install chromium or point CHROME_BIN at a browser.');
 }
 
 const dataDir = await mkdtemp(path.join(tmpdir(), 'openpipes-e2e-'));

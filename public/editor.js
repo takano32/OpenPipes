@@ -540,6 +540,14 @@ function renderPalette() {
         e.dataTransfer.setData('text/plain', d.type);
         e.dataTransfer.effectAllowed = 'copy';
       });
+      // dragging is not the only way in: a click drops it into the middle of
+      // whatever is currently on screen
+      item.addEventListener('click', () => {
+        const wrap = dom.canvasWrap;
+        addModule(d.type,
+          Math.round((wrap.scrollLeft + wrap.clientWidth / 2) / zoom) - 130,
+          Math.round((wrap.scrollTop + wrap.clientHeight / 3) / zoom));
+      });
       group.append(item);
     }
     dom.palette.append(group);
@@ -1494,10 +1502,24 @@ async function toggleLoadMenu() {
   try {
     const list = await api('/api/pipes');
     dom.loadMenu.textContent = '';
+    dom.loadMenu.append(fileActions());
     if (!Array.isArray(list) || list.length === 0) {
       dom.loadMenu.append(el('div', { class: 'menu-note', text: '保存されたパイプはありません' }));
       return;
     }
+    const rows = el('div', { class: 'menu-rows' });
+    if (list.length > 6) {
+      const search = el('input', { class: 'menu-search', type: 'search', placeholder: '絞り込み' });
+      search.addEventListener('input', () => {
+        const q = search.value.trim().toLowerCase();
+        for (const row of rows.children) {
+          row.hidden = q !== '' && !row.dataset.name.toLowerCase().includes(q);
+        }
+      });
+      dom.loadMenu.append(search);
+      setTimeout(() => search.focus(), 0);
+    }
+    dom.loadMenu.append(rows);
     for (const p of list) {
       const label = p.name || p.id;
       let dup = null;
@@ -1520,7 +1542,7 @@ async function toggleLoadMenu() {
           deletePipe(p.id, label);
         });
       }
-      const row = el('div', { class: 'menu-item' },
+      const row = el('div', { class: 'menu-item', 'data-name': label },
         el('span', { class: 'menu-name', text: label }),
         el('span', { class: 'menu-date', text: p.savedAt ? new Date(p.savedAt).toLocaleString() : '' }),
         dup, del);
@@ -1528,11 +1550,81 @@ async function toggleLoadMenu() {
         dom.loadMenu.hidden = true;
         loadPipe(p.id);
       });
-      dom.loadMenu.append(row);
+      rows.append(row);
     }
   } catch (err) {
     dom.loadMenu.textContent = '';
     dom.loadMenu.append(el('div', { class: 'menu-note', text: '取得エラー: ' + err.message }));
+  }
+}
+
+// A pipe file is the unit people share, so the editor can write one out and
+// read one back without the server being involved at all.
+function fileActions() {
+  const box = el('div', { class: 'menu-files' });
+
+  const out = el('button', { class: 'menu-file', type: 'button', text: '⭳ JSON を書き出す' });
+  out.addEventListener('click', (e) => {
+    e.stopPropagation();
+    exportPipe();
+  });
+  box.append(out);
+
+  if (!state.config.readOnly) {
+    const picker = el('input', { type: 'file', accept: '.json,application/json', hidden: '' });
+    picker.addEventListener('change', () => {
+      const file = picker.files && picker.files[0];
+      picker.value = ''; // so choosing the same file twice still fires
+      if (file) importPipe(file);
+    });
+    const inBtn = el('button', { class: 'menu-file', type: 'button', text: '⭱ JSON を読み込む…' });
+    inBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      picker.click();
+    });
+    box.append(inBtn, picker);
+  }
+  return box;
+}
+
+function exportPipe() {
+  const pipe = { name: state.name, modules: state.modules, wires: state.wires };
+  const blob = new Blob([JSON.stringify(pipe, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = el('a', { href: url, download: (state.savedId || 'pipe') + '.json' });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  dom.loadMenu.hidden = true;
+  toast('JSON を書き出しました');
+}
+
+async function importPipe(file) {
+  if (state.dirty && !confirm('未保存の変更があります。破棄して読み込みますか？')) return;
+  try {
+    const pipe = JSON.parse(await file.text());
+    if (!pipe || typeof pipe !== 'object') throw new Error('パイプの JSON ではありません');
+    const clean = sanitizePipe(pipe.modules, pipe.wires);
+    if (!clean.modules.length) throw new Error('モジュールが入っていません');
+    state.name = typeof pipe.name === 'string' && pipe.name ? pipe.name : file.name.replace(/\.json$/i, '');
+    state.modules = clean.modules;
+    state.wires = clean.wires;
+    // an imported file is not yet a saved pipe on this server
+    state.savedId = null;
+    state.selected.clear();
+    state.selectedWire = null;
+    state.lastDebug = null;
+    state.runParams = {};
+    seedCounter();
+    renderPipe();
+    resetHistory();
+    history.savedRev = 0; // nothing on the server matches this yet
+    syncHistoryUI();
+    dom.loadMenu.hidden = true;
+    toast(`${clean.modules.length} 個のモジュールを読み込みました`);
+  } catch (err) {
+    toast('読み込みエラー: ' + err.message, 'error');
   }
 }
 
