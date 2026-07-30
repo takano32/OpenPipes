@@ -23,6 +23,7 @@ in this repo must conform to it exactly.
 ```
 server.js              HTTP server, routing, static files, RSS endpoint
 lib/feed.js            fetch + RSS/Atom/RDF parsing + RSS 2.0 output builder
+lib/html.js            tolerant HTML parser + CSS selector engine (Fetch Page)
 lib/engine.js          module catalog + pipe executor
 public/index.html      editor page shell
 public/editor.css      editor styles
@@ -108,7 +109,7 @@ Param descriptor kinds (the complete set the frontend must support):
 Every param has `name`, `label`, `kind`, `default`. For `rules`, `default` is an
 array with one prototype row.
 
-### Module types (all 23, exact params)
+### Module types (all 24, exact params)
 
 **Sources**
 
@@ -122,7 +123,19 @@ array with one prototype row.
    array inside the response; empty = the root).
    If the located value is an array of objects → those are the items; a single
    object → one item; scalar/array-of-scalars → wrapped as `{ "value": v }`.
-3. `item_builder` — "Item Builder". In: none. Out: `out`.
+3. `fetch_page` — "Fetch Page". In: none. Out: `out`.
+   Params: `url` text default `""`; `item` text default `""` (a CSS selector
+   for the repeating element); `fields` rules — fields `name`, `selector`,
+   `attr` — default `[{"name":"title","selector":"","attr":"text"}]`.
+   Fetches an HTML page and produces one item per element matching `item`; an
+   empty `item` makes the whole document one item. For each field row the
+   first descendant matching `selector` is taken (empty = the item element
+   itself) and `attr` read from it: `text` (whitespace collapsed), `html`
+   (inner markup), or an attribute name. `href`/`src`/`poster`/`data-src` are
+   resolved against the page's URL, since the result is read somewhere else.
+   A row whose selector matches nothing is omitted from that item; an empty
+   `url` yields no items; an unsupported selector is a module error.
+4. `item_builder` — "Item Builder". In: none. Out: `out`.
    Params: `fields` rules, fields `[{name:"name",kind:"text"},{name:"value",kind:"text"}]`,
    default `[{"name":"title","value":""}]`. Emits exactly one item built from
    the rows (`setPath` semantics for dotted names).
@@ -130,14 +143,14 @@ array with one prototype row.
 **User Inputs** — these have **no ports**. They declare a named pipe parameter
 usable anywhere via `${name}` template placeholders (see Execution).
 
-4. `text_input` — "Text Input". Params: `name` text default `"text1"`;
+5. `text_input` — "Text Input". Params: `name` text default `"text1"`;
    `prompt` text default `""`; `default` text default `""`.
-5. `number_input` — "Number Input". Same params but `default` is number kind, default `0`.
-6. `url_input` — "URL Input". Same as text_input, `name` default `"url1"`.
+6. `number_input` — "Number Input". Same params but `default` is number kind, default `0`.
+7. `url_input` — "URL Input". Same as text_input, `name` default `"url1"`.
 
 **Operators**
 
-7. `filter` — "Filter". In: `in`. Out: `out`.
+8. `filter` — "Filter". In: `in`. Out: `out`.
    Params: `mode` select `["permit","block"]` default `"permit"`;
    `combine` select `["all","any"]` default `"all"`;
    `rules` rules — fields: `field` text (placeholder "title"), `op` select
@@ -148,50 +161,50 @@ usable anywhere via `${name}` template placeholders (see Execution).
    case-insensitive string comparisons; `matches_regex` uses `new RegExp(value)`
    (invalid regex → module error); `greater_than`/`less_than` use the smart
    comparator (below). Missing field → rule is false.
-8. `sort` — "Sort". Params: `rules` rules — fields: `field` text, `dir` select
+9. `sort` — "Sort". Params: `rules` rules — fields: `field` text, `dir` select
    `["asc","desc"]`. Default `[{"field":"pubDate","dir":"desc"}]`. Stable
    multi-key sort using the smart comparator.
-9. `truncate` — "Truncate". Params: `count` number min 0 default 10. First N items.
-10. `tail` — "Tail". Params: `count` number min 0 default 10. Last N items.
-11. `unique` — "Unique". Params: `field` text default `"title"`. Keeps the first
+10. `truncate` — "Truncate". Params: `count` number min 0 default 10. First N items.
+11. `tail` — "Tail". Params: `count` number min 0 default 10. Last N items.
+12. `unique` — "Unique". Params: `field` text default `"title"`. Keeps the first
     item per distinct field value (values compared as strings; missing field
     values are all kept? No — items with missing field are kept, they dedupe
     under the key `""`... **Decision:** missing/empty values dedupe under `""`
     like any other value).
-12. `reverse` — "Reverse". No params.
-13. `union` — "Union". Inputs `in1`..`in5`, output `out`. Concatenates in port order.
-14. `count` — "Count". Output: single item `{ "count": <n> }`.
-15. `rename` — "Rename". Params: `rules` rules — fields: `from` text, `op` select
+13. `reverse` — "Reverse". No params.
+14. `union` — "Union". Inputs `in1`..`in5`, output `out`. Concatenates in port order.
+15. `count` — "Count". Output: single item `{ "count": <n> }`.
+16. `rename` — "Rename". Params: `rules` rules — fields: `from` text, `op` select
     `["rename","copy"]`, `to` text. Default `[{"from":"","op":"rename","to":""}]`.
     `rename` moves the field (deletes `from`), `copy` duplicates it. Missing
     `from` → row skipped for that item. The delete is skipped when `to` is
     `from` itself or nested under it (`a` → `a.b`), which would otherwise
     destroy the value that was just written.
-16. `regex` — "Regex". Params: `rules` rules — fields: `field` text, `pattern`
+17. `regex` — "Regex". Params: `rules` rules — fields: `field` text, `pattern`
     text, `replace` text, `flags` text (placeholder "gi"). Default
     `[{"field":"title","pattern":"","replace":"","flags":"g"}]`.
     Applies `String(value).replace(new RegExp(pattern, flags), replace)` to the
     field of every item (field created if missing? **No** — missing field is
     skipped). `$1` backreferences work as in JS. Invalid regex → module error.
-17. `sub_element` — "Sub-element". Params: `path` text default `""`.
+18. `sub_element` — "Sub-element". Params: `path` text default `""`.
     For each item, take the value at `path`: array → each element becomes an
     item (objects as-is, scalars wrapped `{value}`); object → becomes the item;
     scalar → `{ "value": v }`; missing → item dropped.
-18. `string_builder` — "String Builder". Params: `parts` list default `[""]`;
+19. `string_builder` — "String Builder". Params: `parts` list default `[""]`;
     `to` text default `"title"`. Joins the parts (no separator) and writes the
     result to `to`. Parts are **item templates** (below).
-19. `date_builder` — "Date Builder". Params: `field` text default `"pubDate"`;
+20. `date_builder` — "Date Builder". Params: `field` text default `"pubDate"`;
     `format` select `["iso","rfc822","date","datetime","epoch"]` default
     `"iso"`; `to` text default `"pubDate"` (empty falls back to `field`).
     Reformats a parseable date; `epoch` yields a number of milliseconds. A
     value `Date.parse` rejects leaves the item untouched.
-20. `url_builder` — "URL Builder". Params: `base` text default `""`; `query`
+21. `url_builder` — "URL Builder". Params: `base` text default `""`; `query`
     rules — fields `name`, `value` — default one empty row; `to` text default
     `"link"`. Both `base` and each name/value are item templates. Pairs are
     percent-encoded and appended with `?` or `&` depending on whether `base`
     already has a query; a row is skipped when its name or its **value** is
     empty, so a field the item lacks does not produce `&lang=`.
-21. `loop` — "Loop". Params: `pipe` text default `""` (a **saved pipe id**);
+22. `loop` — "Loop". Params: `pipe` text default `""` (a **saved pipe id**);
     `mode` select `["replace","assign"]` default `"replace"`; `to` text default
     `"items"`; `limit` number min 1 default 20.
     Runs the named saved pipe once per input item. The item reaches the
@@ -209,7 +222,7 @@ usable anywhere via `${name}` template placeholders (see Execution).
     The engine never touches the filesystem: `options.loadPipe(id) -> pipe`
     supplies the sub-pipe, and the module reports it is unavailable when the
     caller passes none.
-22. `strip_html` — "Strip HTML". Params: `fields` list default
+23. `strip_html` — "Strip HTML". Params: `fields` list default
     `["description"]`. For each listed field: drops `<script>`/`<style>`
     including their contents, turns `<br>` and closing `p`/`div`/`li` into
     newlines, removes every remaining tag, decodes entities, and collapses
@@ -223,7 +236,7 @@ appear in the same string and do not interfere.
 
 **Output**
 
-23. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
+24. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
 
 There is no Split module: an output port already fans out to as many inputs as
 you wire it to, which is all Yahoo Pipes' Split did.
@@ -262,11 +275,11 @@ Execution:
 4. Evaluate each module in topo order. Unwired input port → `[]`. A module
    that throws records `debug[id].error = message`, produces `[]`, execution
    continues downstream, and `{module, message}` is pushed to `errors`.
-5. `debug[id] = { count, items: <first debugLimit items>, ms, error? }` for
+6. `debug[id] = { count, items: <first debugLimit items>, ms, error? }` for
    every module (user-input modules get `count: 0, items: []`). The debug map
    has a null prototype so a module id of `__proto__` gets a real entry
    instead of silently reassigning the map's prototype.
-6. `items` = the output module's input items, or `[]` if no output module
+7. `items` = the output module's input items, or `[]` if no output module
    (that's allowed here; the RSS endpoint enforces one).
 
 Helpers `getPath(obj, "a.b.c")` / `setPath(obj, path, value)` / `deletePath` are

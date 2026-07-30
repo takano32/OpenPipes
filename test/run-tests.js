@@ -234,14 +234,14 @@ test('buildRSS: RFC 822 pubDate, guid, atom:link self', () => {
 
 // ---------------------------------------------------------------- catalog
 
-test('catalog: all 23 module types with expected port layout', () => {
+test('catalog: all 24 module types with expected port layout', () => {
   const cat = catalog();
   assert.deepEqual(
     cat.map((d) => d.type).sort(),
-    ['count', 'date_builder', 'fetch_feed', 'fetch_json', 'filter', 'item_builder',
-      'loop', 'number_input', 'output', 'regex', 'rename', 'reverse', 'sort',
-      'string_builder', 'strip_html', 'sub_element', 'tail', 'text_input', 'truncate',
-      'union', 'unique', 'url_builder', 'url_input'],
+    ['count', 'date_builder', 'fetch_feed', 'fetch_json', 'fetch_page', 'filter',
+      'item_builder', 'loop', 'number_input', 'output', 'regex', 'rename', 'reverse',
+      'sort', 'string_builder', 'strip_html', 'sub_element', 'tail', 'text_input',
+      'truncate', 'union', 'unique', 'url_builder', 'url_input'],
   );
   const filter = cat.find((d) => d.type === 'filter');
   assert.deepEqual(filter.inputs.map((p) => p.name), ['in']);
@@ -614,6 +614,113 @@ test('strip_html: missing fields are skipped, several fields at once', async () 
     [{ title: '<i>a</i>' }],
     [mod('s', 'strip_html', { fields: ['title', 'description'] })]);
   assert.deepEqual(items, [{ title: 'a' }]);
+});
+
+// --------------------------------------------------------------- html / scraping
+
+const SCRAPE_PAGE = `<!DOCTYPE html>
+<html><head><title>Blog &amp; News</title>
+<script>var a = "<article class='post'>fake</article>";</script></head>
+<body>
+  <!-- <article class="post">commented out</article> -->
+  <ul class="posts">
+    <li class="post"><h2><a href="/a">Alpha &amp; Beta</a></h2><p class=sum>First <b>summary</b></p><time datetime="2026-07-28">Jul 28</time>
+    <li class="post"><h2><a href='/b'>Gamma</a></h2><p class=sum>Second</p><time datetime="2026-07-27">Jul 27</time>
+  </ul>
+  <div class="ad"><h2><a href=/x>Sponsored</a></h2></div>
+</body></html>`;
+
+function scrapePipe(params) {
+  const url = 'http://fake/blog.html';
+  CANNED[url] = SCRAPE_PAGE;
+  return {
+    name: 'scrape',
+    modules: [mod('p', 'fetch_page', { url, ...params }), mod('o', 'output')],
+    wires: [wire('p', 'o')],
+  };
+}
+
+test('parseHTML: recovers from unclosed tags and ignores script contents', async () => {
+  const { parseHTML, queryAll, textOf } = await import('../lib/html.js');
+  const doc = parseHTML(SCRAPE_PAGE);
+  assert.equal(queryAll(doc, 'li.post').length, 2, 'unclosed <li> should still be two');
+  assert.equal(textOf(queryAll(doc, 'title')[0]), 'Blog & News');
+  assert.equal(queryAll(doc, 'article').length, 0, 'markup inside <script> is not markup');
+});
+
+test('selectors: tag, class, id, attribute and combinator forms', async () => {
+  const { parseHTML, queryAll } = await import('../lib/html.js');
+  const doc = parseHTML('<div id=a class="x y"><p><b>1</b></p><b>2</b></div><b>3</b>');
+  assert.equal(queryAll(doc, 'b').length, 3);
+  assert.equal(queryAll(doc, '#a b').length, 2);
+  assert.equal(queryAll(doc, '#a > b').length, 1);
+  assert.equal(queryAll(doc, '.x.y').length, 1);
+  assert.equal(queryAll(doc, '.x.z').length, 0);
+  assert.equal(queryAll(doc, '[id="a"]').length, 1);
+  assert.equal(queryAll(doc, 'p, b').length, 4);
+  assert.throws(() => queryAll(doc, 'a:hover'), /Unsupported selector/);
+});
+
+test('fetch_page: one item per match, with text, html and attributes', async () => {
+  const { items, errors } = await runPipe(scrapePipe({
+    item: 'li.post',
+    fields: [
+      { name: 'title', selector: 'h2 a', attr: 'text' },
+      { name: 'description', selector: 'p.sum', attr: 'html' },
+      { name: 'pubDate', selector: 'time', attr: 'datetime' },
+    ],
+  }), { fetcher });
+  assert.deepEqual(errors, []);
+  assert.deepEqual(items, [
+    { title: 'Alpha & Beta', description: 'First <b>summary</b>', pubDate: '2026-07-28' },
+    { title: 'Gamma', description: 'Second', pubDate: '2026-07-27' },
+  ]);
+});
+
+test('fetch_page: link attributes are resolved against the page', async () => {
+  const { items } = await runPipe(scrapePipe({
+    item: 'li.post',
+    fields: [{ name: 'link', selector: 'h2 a', attr: 'href' }],
+  }), { fetcher });
+  assert.deepEqual(items.map((i) => i.link), ['http://fake/a', 'http://fake/b']);
+});
+
+test('fetch_page: a field whose selector matches nothing is left out', async () => {
+  const { items } = await runPipe(scrapePipe({
+    item: 'li.post',
+    fields: [
+      { name: 'title', selector: 'h2 a', attr: 'text' },
+      { name: 'author', selector: '.byline', attr: 'text' },
+    ],
+  }), { fetcher });
+  assert.deepEqual(Object.keys(items[0]), ['title']);
+});
+
+test('fetch_page: no item selector treats the page as a single item', async () => {
+  const { items } = await runPipe(scrapePipe({
+    item: '',
+    fields: [{ name: 'title', selector: 'title', attr: 'text' }],
+  }), { fetcher });
+  assert.deepEqual(items, [{ title: 'Blog & News' }]);
+});
+
+test('fetch_page: an empty URL yields nothing rather than erroring', async () => {
+  const { items, errors } = await runPipe({
+    name: 'empty',
+    modules: [mod('p', 'fetch_page', { url: '', item: '', fields: [] }), mod('o', 'output')],
+    wires: [wire('p', 'o')],
+  }, { fetcher });
+  assert.deepEqual(items, []);
+  assert.deepEqual(errors, []);
+});
+
+test('fetch_page: a bad selector is a module error, not a crash', async () => {
+  const { items, errors } = await runPipe(scrapePipe({
+    item: 'li:first-child',
+    fields: [{ name: 'title', selector: '', attr: 'text' }],
+  }), { fetcher });
+  assert.deepEqual(items, []);
+  assert.match(errors[0].message, /Unsupported selector/);
 });
 
 // --------------------------------------------------------------------- loop

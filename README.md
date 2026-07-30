@@ -37,12 +37,13 @@ node server.js
 
 例: `http://localhost:3000/pipes/demo-tech-filter/run?q=Rust&format=json`
 
-## モジュール一覧(23 種)
+## モジュール一覧(24 種)
 
 | type | 名前 | カテゴリ | 説明 |
 |------|------|----------|------|
 | `fetch_feed` | Fetch Feed | Sources | 複数 URL の RSS / Atom / RDF を並列取得し、URL 順に連結。各アイテムに `source`(フィードタイトル)を付与 |
 | `fetch_json` | Fetch JSON | Sources | JSON を取得し、ドットパス `path` で指した配列をアイテム化(オブジェクトは 1 件、スカラーは `{value}` に包む) |
+| `fetch_page` | Fetch Page | Sources | HTML ページを CSS セレクタでスクレイピングしてアイテム化 |
 | `item_builder` | Item Builder | Sources | 名前と値のペアからアイテムを 1 件生成(`a.b.c` のドット記法対応) |
 | `text_input` | Text Input | User Inputs | `${name}` で参照できるテキストパラメータを宣言(ポートなし) |
 | `number_input` | Number Input | User Inputs | 数値パラメータを宣言(ポートなし) |
@@ -68,6 +69,14 @@ node server.js
 String Builder と URL Builder の文字列では `{title}` や `{author.name}` と書くとアイテムのフィールドが差し込まれます(存在しなければ空文字、`{{` と `}}` は波括弧そのもの)。実行前に一度だけ置換されるパイプパラメータ `${name}` とは別物で、同じ文字列に混在させても干渉しません。
 
 Yahoo! Pipes にあった Split は用意していません。出力ポートは元から好きなだけ分岐できるので、同じことができます。
+
+### Fetch Page(スクレイピング)
+
+RSS を出していないサイトからフィードを作るためのモジュールです。`item` に繰り返し要素の CSS セレクタ(例 `article.post`)を書くと、一致した要素ごとに 1 アイテムを作ります。空にするとページ全体で 1 アイテムです。
+
+各フィールド行は「取り出す名前 / その要素内を探すセレクタ / 取り出す値」の 3 つで、値は `text`(空白を詰めたテキスト)、`html`(内側のマークアップ)、または属性名を指定します。`href` `src` `poster` `data-src` はページの URL を基準に絶対 URL へ直します(配信先で読まれるため)。セレクタが何にも当たらなかった行は、そのアイテムから省かれます。
+
+対応するセレクタは、タグ・`.class`・`#id`・`[attr]` と `= ^= $= *= ~= |=`・子孫・`>`・カンマ区切りです。`:hover` のような未対応の記法は黙って誤選択せずエラーにします。
 
 ### Loop(サブパイプ)
 

@@ -8,7 +8,7 @@ export const suites = [
   await page.goto(`${origin}/`);
   check('palette lists every catalogued module', await page.eval(
     `fetch('/api/modules').then(r => r.json())
-       .then(c => c.length === document.querySelectorAll('.pal-item').length && c.length)`) === 23);
+       .then(c => c.length === document.querySelectorAll('.pal-item').length && c.length)`) === 24);
   check('palette groups the 4 categories',
     await page.eval(`document.querySelectorAll('.pal-group').length`) === 4);
   check('the empty-canvas hint is visible',
