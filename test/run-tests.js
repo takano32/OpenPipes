@@ -1,6 +1,6 @@
 // OpenPipes test suite — dependency-free, no network (all fetches are canned).
 import assert from 'node:assert/strict';
-import { parseFeed, buildRSS, escapeXml } from '../lib/feed.js';
+import { parseFeed, buildRSS, buildJSONFeed, escapeXml } from '../lib/feed.js';
 import { runPipe, catalog, PipeError } from '../lib/engine.js';
 
 // ---------------------------------------------------------------- harness
@@ -614,6 +614,56 @@ test('strip_html: missing fields are skipped, several fields at once', async () 
     [{ title: '<i>a</i>' }],
     [mod('s', 'strip_html', { fields: ['title', 'description'] })]);
   assert.deepEqual(items, [{ title: 'a' }]);
+});
+
+// ------------------------------------------------------------------ JSON Feed
+
+test('buildJSONFeed: version 1.1 envelope with feed metadata', () => {
+  const feed = JSON.parse(buildJSONFeed({
+    title: 'My pipe', link: 'http://host/pipes/p/run', description: 'about it', items: [],
+  }));
+  assert.equal(feed.version, 'https://jsonfeed.org/version/1.1');
+  assert.equal(feed.title, 'My pipe');
+  assert.equal(feed.home_page_url, 'http://host/pipes/p/run');
+  assert.equal(feed.feed_url, 'http://host/pipes/p/run');
+  assert.equal(feed.description, 'about it');
+  assert.deepEqual(feed.items, []);
+});
+
+test('buildJSONFeed: maps the canonical item fields', () => {
+  const { items } = JSON.parse(buildJSONFeed({
+    title: 't',
+    items: [{
+      title: 'Hello', link: 'http://x/1', description: '<p>body</p>',
+      pubDate: 'Tue, 28 Jul 2026 09:30:00 GMT', guid: 'g1',
+      author: 'Ada', categories: ['a', 'b'],
+    }],
+  }));
+  assert.deepEqual(items, [{
+    id: 'g1',
+    title: 'Hello',
+    url: 'http://x/1',
+    content_html: '<p>body</p>',
+    date_published: '2026-07-28T09:30:00.000Z',
+    authors: [{ name: 'Ada' }],
+    tags: ['a', 'b'],
+  }]);
+});
+
+test('buildJSONFeed: only emits what the item has, and always an id', () => {
+  const { items } = JSON.parse(buildJSONFeed({
+    title: 't',
+    items: [{ title: 'only a title' }, { link: 'http://x/2' }, {}],
+  }));
+  assert.deepEqual(Object.keys(items[0]), ['id', 'title']);
+  assert.equal(items[0].id, 'only a title', 'falls back to the title');
+  assert.equal(items[1].id, 'http://x/2', 'then to the link');
+  assert.equal(items[2].id, '2', 'and finally to the position');
+});
+
+test('buildJSONFeed: an unparseable date is left out rather than emitted as junk', () => {
+  const { items } = JSON.parse(buildJSONFeed({ title: 't', items: [{ title: 'x', pubDate: 'soon' }] }));
+  assert.equal(items[0].date_published, undefined);
 });
 
 // --------------------------------------------------------------- html / scraping

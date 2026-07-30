@@ -32,7 +32,7 @@ node server.js
 
 保存後は `/pipes/<id>/run` で実行結果を取得できます。
 
-- 既定(または `?format=rss`)で RSS 2.0、`?format=json` で `{ "items": [...] }`
+- 既定(または `?format=rss`)で RSS 2.0、`?format=json` で `{ "items": [...] }`、`?format=jsonfeed` で [JSON Feed 1.1](https://jsonfeed.org/version/1.1)
 - `format` 以外のクエリパラメータは `${name}` パラメータの上書きに使われます
 
 例: `http://localhost:3000/pipes/demo-tech-filter/run?q=Rust&format=json`
@@ -116,7 +116,7 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 | POST | `/api/pipes` | body `{ id?, name, modules, wires }` → 保存して `{ id }` を返す |
 | GET | `/api/pipes/:id` | 保存ファイルの JSON(存在しなければ 404 `{error}`) |
 | DELETE | `/api/pipes/:id` | `{ ok: true }` |
-| GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で JSON)。`format` 以外のクエリはパイプパラメータになる |
+| GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で素の JSON、`?format=jsonfeed` で JSON Feed 1.1)。`format` 以外のクエリはパイプパラメータになる |
 | GET | `/api/config` | `{ readOnly, authRequired }`(常に認証不要) |
 
 ## デモパイプ

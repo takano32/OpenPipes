@@ -261,6 +261,33 @@ test('cache: a failing run is not cached', () =>
     }
   }));
 
+test('jsonfeed: the published feed can be served as JSON Feed 1.1', () =>
+  withServer({}, async ({ origin }) => {
+    const res = await feed(origin, '?format=jsonfeed');
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'application/feed+json; charset=utf-8');
+    const body = await res.json();
+    assert.equal(body.version, 'https://jsonfeed.org/version/1.1');
+    assert.equal(body.title, 'デモ: テックニュース絞り込み');
+    assert.ok(body.items.length > 0);
+    for (const item of body.items) {
+      assert.ok(item.id, 'every item needs an id');
+      assert.match(item.url, /^https:\/\//);
+    }
+  }));
+
+test('jsonfeed: rss, json and jsonfeed are three separate cache entries', () =>
+  withServer({}, async ({ origin }) => {
+    const seen = new Set();
+    for (const q of ['', '?format=json', '?format=jsonfeed']) {
+      const res = await feed(origin, q);
+      assert.equal(res.headers.get('x-openpipes-cache'), 'miss', q || '(rss)');
+      seen.add(res.headers.get('etag'));
+      assert.equal((await feed(origin, q)).headers.get('x-openpipes-cache'), 'hit');
+    }
+    assert.equal(seen.size, 3, 'each format should hash differently');
+  }));
+
 // ------------------------------------------------------------- address filter
 
 test('a pipe cannot reach loopback through the run endpoint', () =>

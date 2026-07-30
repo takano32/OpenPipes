@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
 
 import { runPipe, catalog, PipeError } from './lib/engine.js';
-import { buildRSS } from './lib/feed.js';
+import { buildJSONFeed, buildRSS } from './lib/feed.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -337,19 +337,30 @@ async function handleRunSaved(req, res, match, url) {
     throw httpError(502, result.errors.map((e) => `${e.module}: ${e.message}`).join('; '));
   }
 
-  const json = url.searchParams.get('format') === 'json';
-  const body = json
-    ? JSON.stringify({ items: result.items })
-    : buildRSS({
-      title: pipe.name,
-      link: baseUrlOf(req) + req.url,
-      description: 'OpenPipes: ' + pipe.name,
-      items: result.items,
-    });
+  const format = url.searchParams.get('format');
+  const feed = {
+    title: pipe.name,
+    link: baseUrlOf(req) + req.url,
+    description: 'OpenPipes: ' + pipe.name,
+    items: result.items,
+  };
+  let body;
+  let contentType;
+  if (format === 'json') {
+    // the plain shape this endpoint has always returned
+    body = JSON.stringify({ items: result.items });
+    contentType = 'application/json; charset=utf-8';
+  } else if (format === 'jsonfeed') {
+    body = buildJSONFeed(feed);
+    contentType = 'application/feed+json; charset=utf-8';
+  } else {
+    body = buildRSS(feed);
+    contentType = 'application/rss+xml; charset=utf-8';
+  }
   const entry = {
     expires: Date.now() + CACHE_TTL_SECONDS * 1000,
     etag: '"' + crypto.createHash('sha256').update(body).digest('base64url').slice(0, 27) + '"',
-    contentType: json ? 'application/json; charset=utf-8' : 'application/rss+xml; charset=utf-8',
+    contentType,
     body,
   };
   cacheSet(key, entry);

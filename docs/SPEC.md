@@ -298,6 +298,7 @@ export function parseFeed(xmlString)  // -> { title, link, description, items: [
 export async function fetchURL(url, { timeoutMs = 15000, maxBytes = 5_000_000, baseUrl } = {})
                                       // -> { status, headers: {lowercased}, text }
 export function buildRSS({ title, link, description, items }) // -> RSS 2.0 XML string
+export function buildJSONFeed({ title, link, description, items }) // -> JSON Feed 1.1 string
 ```
 
 - `parseFeed` handles RSS 2.0 (`<rss><channel><item>`), RSS 1.0/RDF
@@ -356,7 +357,7 @@ export function buildRSS({ title, link, description, items }) // -> RSS 2.0 XML 
 | GET    | `/api/pipes/:id`      | full saved file JSON, 404 `{error}` if missing |
 | DELETE | `/api/pipes/:id`      | `{ ok: true }` |
 | GET    | `/api/config`         | `{ readOnly, authRequired }` — what the editor needs to know about this instance. Always public |
-| GET    | `/pipes/:id/run`      | executes saved pipe (cached, ETag + 304). `?format=json` → `{ items }`; default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
+| GET    | `/pipes/:id/run`      | executes saved pipe (cached, ETag + 304). `?format=json` → `{ items }`; `?format=jsonfeed` → JSON Feed 1.1 (`application/feed+json`); default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
 
 ### Feed caching
 
