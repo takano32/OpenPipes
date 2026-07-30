@@ -1055,9 +1055,19 @@ async function toggleLoadMenu() {
       return;
     }
     for (const p of list) {
+      const label = p.name || p.id;
+      const del = el('button', {
+        class: 'menu-del', type: 'button', text: '×',
+        title: `「${label}」を削除`, 'aria-label': `${label} を削除`,
+      });
+      del.addEventListener('click', (e) => {
+        e.stopPropagation(); // the row itself loads the pipe
+        deletePipe(p.id, label);
+      });
       const row = el('div', { class: 'menu-item' },
-        el('span', { class: 'menu-name', text: p.name || p.id }),
-        el('span', { class: 'menu-date', text: p.savedAt ? new Date(p.savedAt).toLocaleString() : '' }));
+        el('span', { class: 'menu-name', text: label }),
+        el('span', { class: 'menu-date', text: p.savedAt ? new Date(p.savedAt).toLocaleString() : '' }),
+        del);
       row.addEventListener('click', () => {
         dom.loadMenu.hidden = true;
         loadPipe(p.id);
@@ -1067,6 +1077,28 @@ async function toggleLoadMenu() {
   } catch (err) {
     dom.loadMenu.textContent = '';
     dom.loadMenu.append(el('div', { class: 'menu-note', text: '取得エラー: ' + err.message }));
+  }
+}
+
+async function deletePipe(id, label) {
+  if (!confirm(`「${label}」を削除しますか？この操作は取り消せません。`)) return;
+  try {
+    await api('/api/pipes/' + encodeURIComponent(id), { method: 'DELETE' });
+    // the open pipe was the deleted one: keep the graph on the canvas, but it
+    // is no longer backed by a file, so it counts as unsaved again
+    if (state.savedId === id) {
+      state.savedId = null;
+      history.savedRev = 0; // no revision was ever 0
+      updateOpenRss();
+      syncHistoryUI();
+    }
+    toast(`「${label}」を削除しました`);
+  } catch (err) {
+    toast('削除エラー: ' + err.message, 'error');
+  }
+  if (!dom.loadMenu.hidden) {
+    dom.loadMenu.hidden = true;
+    toggleLoadMenu(); // reopen on the refreshed list
   }
 }
 
