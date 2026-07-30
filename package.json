@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "test": "node test/run-tests.js"
+    "test": "node test/run-tests.js",
+    "test:e2e": "node test/e2e/run.mjs"
   },
   "engines": {
     "node": ">=18"

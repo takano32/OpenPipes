@@ -10,7 +10,10 @@ import { buildRSS } from './lib/feed.js';
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DEMO_DIR = path.join(ROOT, 'assets', 'demo');
-const PIPES_DIR = path.join(ROOT, 'data', 'pipes');
+// OPENPIPES_DATA lets a test run point at a throwaway directory
+const PIPES_DIR = process.env.OPENPIPES_DATA
+  ? path.resolve(process.env.OPENPIPES_DATA)
+  : path.join(ROOT, 'data', 'pipes');
 
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_BODY_BYTES = 1024 * 1024;

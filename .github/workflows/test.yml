@@ -32,3 +32,19 @@ jobs:
       # public/editor.js runs in the browser, so the suite never loads it.
       - name: Syntax-check the editor
         run: node --check public/editor.js
+
+  # The editor is only exercised by a real browser, and the CDP client needs a
+  # global WebSocket, so this runs on one modern Node rather than the matrix.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    name: editor (browser)
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Run the browser tests
+        run: npm run test:e2e
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
