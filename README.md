@@ -34,7 +34,7 @@ node server.js
 
 例: `http://localhost:3000/pipes/demo-tech-filter/run?q=Rust&format=json`
 
-## モジュール一覧(18 種)
+## モジュール一覧(22 種)
 
 | type | 名前 | カテゴリ | 説明 |
 |------|------|----------|------|
@@ -55,7 +55,15 @@ node server.js
 | `rename` | Rename | Operators | フィールドの移動(rename)または複製(copy) |
 | `regex` | Regex | Operators | 正規表現でフィールド値を置換(`$1` 後方参照・フラグ対応) |
 | `sub_element` | Sub-element | Operators | パスの値を新しいアイテム列に展開(配列は要素ごと、欠損アイテムは除去) |
+| `string_builder` | String Builder | Operators | 複数のパーツを連結して指定フィールドに書き込む |
+| `date_builder` | Date Builder | Operators | 日付フィールドを iso / rfc822 / date / datetime / epoch に整形 |
+| `url_builder` | URL Builder | Operators | ベース URL にクエリパラメータを付けて組み立てる(値が空の行は出力しない) |
+| `strip_html` | Strip HTML | Operators | 指定フィールドからタグを除去して実体参照を復元 |
 | `output` | Pipe Output | Output | パイプの最終結果。1 パイプに 1 つ |
+
+String Builder と URL Builder の文字列では `{title}` や `{author.name}` と書くとアイテムのフィールドが差し込まれます(存在しなければ空文字、`{{` と `}}` は波括弧そのもの)。実行前に一度だけ置換されるパイプパラメータ `${name}` とは別物で、同じ文字列に混在させても干渉しません。
+
+Yahoo! Pipes にあった Split は用意していません。出力ポートは元から好きなだけ分岐できるので、同じことができます。
 
 ## パイプ定義 JSON フォーマット
 

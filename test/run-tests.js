@@ -234,13 +234,14 @@ test('buildRSS: RFC 822 pubDate, guid, atom:link self', () => {
 
 // ---------------------------------------------------------------- catalog
 
-test('catalog: all 18 module types with expected port layout', () => {
+test('catalog: all 22 module types with expected port layout', () => {
   const cat = catalog();
   assert.deepEqual(
     cat.map((d) => d.type).sort(),
-    ['count', 'fetch_feed', 'fetch_json', 'filter', 'item_builder', 'number_input', 'output',
-      'regex', 'rename', 'reverse', 'sort', 'sub_element', 'tail', 'text_input', 'truncate',
-      'union', 'unique', 'url_input'],
+    ['count', 'date_builder', 'fetch_feed', 'fetch_json', 'filter', 'item_builder',
+      'number_input', 'output', 'regex', 'rename', 'reverse', 'sort', 'string_builder',
+      'strip_html', 'sub_element', 'tail', 'text_input', 'truncate', 'union', 'unique',
+      'url_builder', 'url_input'],
   );
   const filter = cat.find((d) => d.type === 'filter');
   assert.deepEqual(filter.inputs.map((p) => p.name), ['in']);
@@ -549,6 +550,70 @@ test('end-to-end: fetch_feed -> filter ${q} -> sort desc -> truncate -> output',
   const { items, errors } = await runPipe({ name: 'demo shape', modules, wires }, { fetcher });
   assert.deepEqual(errors, []);
   assert.deepEqual(titles(items), ['AI beats benchmark', 'New AI regulation draft', 'AI assistant for farmers']);
+});
+
+// -------------------------------------------------------------- new builders
+
+test('string_builder: joins parts and interpolates {path}', async () => {
+  const { items } = await runOps(
+    [{ title: 'Rust', author: { name: 'ada' } }],
+    [mod('b', 'string_builder', { parts: ['[', '{author.name}', '] ', '{title}'], to: 'headline' })]);
+  assert.equal(items[0].headline, '[ada] Rust');
+  assert.equal(items[0].title, 'Rust', 'the source field is left alone');
+});
+
+test('string_builder: missing paths become empty, {{ }} are literal braces', async () => {
+  const { items } = await runOps(
+    [{ title: 'X' }],
+    [mod('b', 'string_builder', { parts: ['{{a}} {title} {nope}'], to: 'out' })]);
+  assert.equal(items[0].out, '{a} X ');
+});
+
+test('date_builder: each format, leaving unparseable values alone', async () => {
+  const src = [{ pubDate: '2026-07-28T14:05:00.000Z' }];
+  const at = async (format) => (await runOps(src,
+    [mod('d', 'date_builder', { field: 'pubDate', format, to: 'when' })])).items[0].when;
+  assert.equal(await at('iso'), '2026-07-28T14:05:00.000Z');
+  assert.equal(await at('rfc822'), 'Tue, 28 Jul 2026 14:05:00 GMT');
+  assert.equal(await at('date'), '2026-07-28');
+  assert.equal(await at('datetime'), '2026-07-28 14:05:00');
+  assert.equal(await at('epoch'), Date.parse('2026-07-28T14:05:00.000Z'));
+
+  const { items } = await runOps([{ pubDate: 'not a date' }],
+    [mod('d', 'date_builder', { field: 'pubDate', format: 'iso', to: 'when' })]);
+  assert.deepEqual(items, [{ pubDate: 'not a date' }]);
+});
+
+test('url_builder: percent-encodes, skips empty values, respects an existing query', async () => {
+  const { items } = await runOps(
+    [{ title: 'Rust & Go', lang: '' }],
+    [mod('u', 'url_builder', {
+      base: 'https://example.com/s?v=1',
+      query: [{ name: 'q', value: '{title}' }, { name: 'lang', value: '{lang}' }, { name: '', value: 'x' }],
+      to: 'link',
+    })]);
+  assert.equal(items[0].link, 'https://example.com/s?v=1&q=Rust%20%26%20Go');
+});
+
+test('url_builder: no query rows leaves the base untouched', async () => {
+  const { items } = await runOps([{ title: 'x' }],
+    [mod('u', 'url_builder', { base: 'https://example.com/{title}', query: [], to: 'link' })]);
+  assert.equal(items[0].link, 'https://example.com/x');
+});
+
+test('strip_html: drops markup and script bodies, decodes entities', async () => {
+  const { items } = await runOps(
+    [{ description: '<p>Hello &amp; welcome</p><script>bad()</script><div>Line two</div>', title: '<b>keep</b>' }],
+    [mod('s', 'strip_html', { fields: ['description'] })]);
+  assert.equal(items[0].description, 'Hello & welcome\nLine two');
+  assert.equal(items[0].title, '<b>keep</b>', 'only the listed fields are touched');
+});
+
+test('strip_html: missing fields are skipped, several fields at once', async () => {
+  const { items } = await runOps(
+    [{ title: '<i>a</i>' }],
+    [mod('s', 'strip_html', { fields: ['title', 'description'] })]);
+  assert.deepEqual(items, [{ title: 'a' }]);
 });
 
 // ---------------------------------------------------------- hostile field paths

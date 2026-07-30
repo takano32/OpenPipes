@@ -108,7 +108,7 @@ Param descriptor kinds (the complete set the frontend must support):
 Every param has `name`, `label`, `kind`, `default`. For `rules`, `default` is an
 array with one prototype row.
 
-### Module types (all 18, exact params)
+### Module types (all 22, exact params)
 
 **Sources**
 
@@ -177,10 +177,38 @@ usable anywhere via `${name}` template placeholders (see Execution).
     For each item, take the value at `path`: array → each element becomes an
     item (objects as-is, scalars wrapped `{value}`); object → becomes the item;
     scalar → `{ "value": v }`; missing → item dropped.
+18. `string_builder` — "String Builder". Params: `parts` list default `[""]`;
+    `to` text default `"title"`. Joins the parts (no separator) and writes the
+    result to `to`. Parts are **item templates** (below).
+19. `date_builder` — "Date Builder". Params: `field` text default `"pubDate"`;
+    `format` select `["iso","rfc822","date","datetime","epoch"]` default
+    `"iso"`; `to` text default `"pubDate"` (empty falls back to `field`).
+    Reformats a parseable date; `epoch` yields a number of milliseconds. A
+    value `Date.parse` rejects leaves the item untouched.
+20. `url_builder` — "URL Builder". Params: `base` text default `""`; `query`
+    rules — fields `name`, `value` — default one empty row; `to` text default
+    `"link"`. Both `base` and each name/value are item templates. Pairs are
+    percent-encoded and appended with `?` or `&` depending on whether `base`
+    already has a query; a row is skipped when its name or its **value** is
+    empty, so a field the item lacks does not produce `&lang=`.
+21. `strip_html` — "Strip HTML". Params: `fields` list default
+    `["description"]`. For each listed field: drops `<script>`/`<style>`
+    including their contents, turns `<br>` and closing `p`/`div`/`li` into
+    newlines, removes every remaining tag, decodes entities, and collapses
+    runs of spaces. Missing fields are skipped.
+
+**Item templates** — in `string_builder` and `url_builder`, `{a.b}` is
+replaced per item with the value at that field path (missing → empty string);
+`{{` and `}}` are literal braces. This is deliberately *not* `${name}`, which
+the engine substitutes once before the run from pipe parameters — the two can
+appear in the same string and do not interfere.
 
 **Output**
 
-18. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
+22. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
+
+There is no Split module: an output port already fans out to as many inputs as
+you wire it to, which is all Yahoo Pipes' Split did.
 
 ### Smart comparator (shared by filter gt/lt and sort)
 
