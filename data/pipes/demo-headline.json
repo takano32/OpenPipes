@@ -1,0 +1,39 @@
+{
+  "id": "demo-headline",
+  "name": "デモ: 見出しを整える (Loop 用サブパイプ)",
+  "savedAt": "2026-07-30T00:00:00.000Z",
+  "modules": [
+    {
+      "id": "m1",
+      "type": "item_builder",
+      "params": {
+        "fields": [
+          { "name": "title", "value": "${source} — ${title}" },
+          { "name": "link", "value": "${link}" },
+          { "name": "description", "value": "${description}" },
+          { "name": "pubDate", "value": "${pubDate}" }
+        ]
+      },
+      "x": 40,
+      "y": 40
+    },
+    {
+      "id": "m2",
+      "type": "date_builder",
+      "params": { "field": "pubDate", "format": "rfc822", "to": "pubDate" },
+      "x": 40,
+      "y": 330
+    },
+    {
+      "id": "m3",
+      "type": "output",
+      "params": {},
+      "x": 40,
+      "y": 500
+    }
+  ],
+  "wires": [
+    { "id": "w1", "from": { "module": "m1", "port": "out" }, "to": { "module": "m2", "port": "in" } },
+    { "id": "w2", "from": { "module": "m2", "port": "out" }, "to": { "module": "m3", "port": "in" } }
+  ]
+}
