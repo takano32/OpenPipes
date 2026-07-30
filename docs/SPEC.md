@@ -332,6 +332,24 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
   drag updates wires live. No zoom (keep it robust).
 - Status toasts (saved / run errors) bottom-right, auto-dismiss.
 - Deep link: `/?pipe=<id>` loads that saved pipe on startup.
+- **Undo / redo** (↶ ↷ buttons plus `Ctrl`/`Cmd`+`Z`, `Ctrl`/`Cmd`+`Shift`+`Z`,
+  `Ctrl`+`Y`), retaining the 60 most recent states. Snapshot-based: each step stores a deep
+  clone of `{name, modules, wires}` — the graph is small and plain JSON, and
+  value edits write straight into `state.params` from input listeners, so
+  there is no single funnel a command log could hook. What counts as one step:
+  add/delete a module, add/replace/delete a wire, one card drag (not one
+  `pointermove`), one row added or removed, one select change, and one
+  *continuous run of typing in a single field* — consecutive commits carrying
+  the same coalesce key overwrite the top entry instead of stacking, and
+  leaving the field (`focusout`) ends the run. The shortcuts are ignored while
+  a text field has focus so the browser's own text undo wins; `<select>` has
+  no native undo, so they still apply there. Redo is dropped as soon as a new
+  edit is committed. New/Load reset the history — a different document, not an
+  undoable edit. Restoring keeps everything outside the graph (`savedId`,
+  `state.counter`, last run's debug output, user-input values) and drops the
+  selection only when the selected module or wire is gone from the restored
+  graph. `dirty` is derived as "current history index ≠ the index at the last
+  save", so undoing back to the saved state clears it.
 - Input ports have `pointer-events: none` except while a wire drag is active
   (`body.wiring`), so their enlarged hit halos never steal clicks/drags aimed
   at the card header they sit on.

@@ -108,7 +108,24 @@ button, input, select { font-family: inherit; color: inherit; }
 
 .btn.primary:hover { background: #2571d4; }
 
-.btn:disabled { opacity: 0.55; cursor: default; }
+.btn:disabled { opacity: 0.4; cursor: default; }
+
+.btn:disabled:hover { background: #fff; border-color: var(--border); }
+
+.btn.icon {
+  width: 30px;
+  padding: 6px 0;
+  font-size: 15px;
+  line-height: 1;
+  text-align: center;
+}
+
+.topbar-sep {
+  width: 1px;
+  height: 22px;
+  margin: 0 2px;
+  background: var(--border);
+}
 
 #load-wrap { position: relative; }
 

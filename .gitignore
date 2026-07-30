@@ -1,3 +1,7 @@
 node_modules/
 *.log
 .DS_Store
+
+# Pipes saved from the editor live here; only the shipped demos are tracked.
+data/pipes/*
+!data/pipes/demo-*.json

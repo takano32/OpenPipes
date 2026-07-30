@@ -24,6 +24,23 @@ const state = {
   dbgCollapsed: false,
 };
 
+/*
+ * Undo/redo history. Snapshots rather than commands: the graph is small and
+ * plain JSON, and value edits write straight into state.params from input
+ * listeners, so there is no single funnel a command log could hook.
+ * `key` coalesces a run of edits to one field into a single step.
+ */
+const MAX_HISTORY = 60;
+// Entries carry a revision number rather than being identified by their slot:
+// slots get rewritten by coalescing, discarded when a new edit drops the redo
+// tail, and renumbered when the cap trims the oldest, so a saved *slot* stops
+// meaning "the state that was saved". A revision only ever names one state.
+const history = { stack: [], index: 0, savedRev: 0, lastKey: null, rev: 0 };
+
+// true while a pointer drag owns the state; undo mid-drag would swap the
+// object under the drag handler and the rest of the gesture would be lost
+let interacting = false;
+
 const dom = {};
 const cardEls = new Map();  // module id -> card element
 const wireEls = new Map();  // wire id -> svg <g>
@@ -84,7 +101,73 @@ function seedCounter() {
   state.counter = max + 1;
 }
 
-function markDirty() { state.dirty = true; }
+/* ---------- history ---------- */
+
+function snapshot() {
+  return {
+    rev: ++history.rev,
+    state: structuredClone({ name: state.name, modules: state.modules, wires: state.wires }),
+  };
+}
+
+// Records the state as it is now. Pass a `key` for edits that should collapse
+// into one step while they continue (typing in one field); consecutive commits
+// with the same key overwrite the top entry instead of stacking.
+function commit(key = null) {
+  if (key && key === history.lastKey && history.index > 0) {
+    history.stack[history.index] = snapshot();
+  } else {
+    history.stack.length = history.index + 1;
+    history.stack.push(snapshot());
+    if (history.stack.length > MAX_HISTORY) history.stack.shift();
+    history.index = history.stack.length - 1;
+  }
+  history.lastKey = key;
+  syncHistoryUI();
+}
+
+function resetHistory() {
+  history.stack = [snapshot()];
+  history.index = 0;
+  history.savedRev = history.stack[0].rev;
+  history.lastKey = null;
+  syncHistoryUI();
+}
+
+function restore(snap) {
+  state.name = snap.name;
+  state.modules = structuredClone(snap.modules);
+  state.wires = structuredClone(snap.wires);
+  // the selected module/wire may not exist in the restored graph
+  if (state.selection) {
+    const list = state.selection.kind === 'module' ? state.modules : state.wires;
+    if (!list.some((o) => o.id === state.selection.id)) state.selection = null;
+  }
+  renderPipe();
+}
+
+function undo() {
+  if (interacting || history.index === 0) return;
+  history.index -= 1;
+  history.lastKey = null;
+  restore(history.stack[history.index].state);
+  syncHistoryUI();
+}
+
+function redo() {
+  if (interacting || history.index >= history.stack.length - 1) return;
+  history.index += 1;
+  history.lastKey = null;
+  restore(history.stack[history.index].state);
+  syncHistoryUI();
+}
+
+function syncHistoryUI() {
+  const current = history.stack[history.index];
+  state.dirty = !current || current.rev !== history.savedRev;
+  if (dom.undo) dom.undo.disabled = history.index === 0;
+  if (dom.redo) dom.redo.disabled = history.index >= history.stack.length - 1;
+}
 
 function toast(message, kind) {
   const t = el('div', { class: 'toast' + (kind === 'error' ? ' error' : ''), text: message });
@@ -128,6 +211,8 @@ async function init() {
   dom.pipeName = $('#pipe-name');
   dom.openRss = $('#open-rss');
   dom.loadMenu = $('#load-menu');
+  dom.undo = $('#btn-undo');
+  dom.redo = $('#btn-redo');
 
   try {
     state.catalog = await api('/api/modules');
@@ -143,6 +228,7 @@ async function init() {
   bindKeys();
   bindDebugger();
   renderPipe();
+  resetHistory();
 
   const deepLink = new URLSearchParams(location.search).get('pipe');
   if (deepLink) loadPipe(deepLink);
@@ -202,7 +288,7 @@ function addModule(type, x, y) {
   for (const p of d.params) params[p.name] = structuredClone(p.default);
   const mod = { id: nextId('m'), type, params, x: Math.max(0, x), y: Math.max(0, y) };
   state.modules.push(mod);
-  markDirty();
+  commit();
   dom.canvas.append(renderCard(mod));
   select({ kind: 'module', id: mod.id });
   renderParamsStrip();
@@ -224,7 +310,7 @@ function removeModule(id) {
   const card = cardEls.get(id);
   if (card) card.remove();
   cardEls.delete(id);
-  markDirty();
+  commit();
   renderParamsStrip();
   if (state.selection && state.selection.kind === 'module' && state.selection.id === id) {
     select(null);
@@ -354,13 +440,13 @@ function renderParams(body, mod, d) {
     if (p.kind === 'text' || p.kind === 'number') {
       wrap.append(scalarInput(p, mod.params[p.name], (v) => {
         mod.params[p.name] = v;
-        markDirty();
+        commit(`param:${mod.id}:${p.name}`);
         if (isUserInput(mod)) renderParamsStrip();
       }));
     } else if (p.kind === 'select') {
       wrap.append(selectInput(p.options, mod.params[p.name], (v) => {
         mod.params[p.name] = v;
-        markDirty();
+        commit();
       }));
     } else if (p.kind === 'list') {
       wrap.append(listEditor(mod, p));
@@ -371,7 +457,7 @@ function renderParams(body, mod, d) {
   }
 }
 
-function scalarInput(p, value, commit) {
+function scalarInput(p, value, onChange) {
   const input = el('input', {
     type: p.kind === 'number' ? 'number' : 'text',
     value: value == null ? '' : String(value),
@@ -379,7 +465,7 @@ function scalarInput(p, value, commit) {
   if (p.placeholder) input.placeholder = p.placeholder;
   if (p.kind === 'number' && p.min !== undefined) input.min = p.min;
   input.addEventListener('input', () => {
-    commit(p.kind === 'number' ? numberValue(input) : input.value);
+    onChange(p.kind === 'number' ? numberValue(input) : input.value);
   });
   return input;
 }
@@ -389,11 +475,11 @@ function numberValue(input) {
   return Number.isFinite(n) ? n : input.value;
 }
 
-function selectInput(options, value, commit) {
+function selectInput(options, value, onChange) {
   const sel = el('select');
   for (const o of options || []) sel.append(el('option', { value: o, text: o }));
   if (value != null) sel.value = String(value);
-  sel.addEventListener('change', () => commit(sel.value));
+  sel.addEventListener('change', () => onChange(sel.value));
   return sel;
 }
 
@@ -401,15 +487,15 @@ function selectInput(options, value, commit) {
 
 function rowButtons(arr, i, blank, rebuild) {
   const add = el('button', { class: 'row-btn', type: 'button', title: '行を追加', text: '+' });
-  add.addEventListener('click', () => { arr.splice(i + 1, 0, blank()); markDirty(); rebuild(); });
+  add.addEventListener('click', () => { arr.splice(i + 1, 0, blank()); commit(); rebuild(); });
   const del = el('button', { class: 'row-btn', type: 'button', title: '行を削除', text: '×' });
-  del.addEventListener('click', () => { arr.splice(i, 1); markDirty(); rebuild(); });
+  del.addEventListener('click', () => { arr.splice(i, 1); commit(); rebuild(); });
   return el('span', { class: 'row-btns' }, add, del);
 }
 
 function addRowButton(arr, blank, rebuild) {
   const b = el('button', { class: 'row-add', type: 'button', text: '+ 行を追加' });
-  b.addEventListener('click', () => { arr.push(blank()); markDirty(); rebuild(); });
+  b.addEventListener('click', () => { arr.push(blank()); commit(); rebuild(); });
   return b;
 }
 
@@ -422,7 +508,10 @@ function listEditor(mod, p) {
     arr.forEach((v, i) => {
       const input = el('input', { type: 'text', value: v == null ? '' : String(v) });
       if (p.placeholder) input.placeholder = p.placeholder;
-      input.addEventListener('input', () => { arr[i] = input.value; markDirty(); });
+      input.addEventListener('input', () => {
+        arr[i] = input.value;
+        commit(`param:${mod.id}:${p.name}:${i}`);
+      });
       box.append(el('div', { class: 'row' }, input, rowButtons(arr, i, blank, rebuild)));
     });
     if (arr.length === 0) box.append(addRowButton(arr, blank, rebuild));
@@ -452,7 +541,7 @@ function rulesEditor(mod, p) {
       for (const f of p.fields) {
         let control;
         if (f.kind === 'select') {
-          control = selectInput(f.options, row[f.name], (v) => { row[f.name] = v; markDirty(); });
+          control = selectInput(f.options, row[f.name], (v) => { row[f.name] = v; commit(); });
         } else {
           control = el('input', {
             type: f.kind === 'number' ? 'number' : 'text',
@@ -461,7 +550,7 @@ function rulesEditor(mod, p) {
           if (f.placeholder) control.placeholder = f.placeholder;
           control.addEventListener('input', () => {
             row[f.name] = f.kind === 'number' ? numberValue(control) : control.value;
-            markDirty();
+            commit(`param:${mod.id}:${p.name}:${i}:${f.name}`);
           });
         }
         control.title = f.name;
@@ -488,6 +577,7 @@ function startCardDrag(e, mod, card, header) {
   const origX = mod.x;
   const origY = mod.y;
   let moved = false;
+  interacting = true;
   try { header.setPointerCapture(e.pointerId); } catch { /* inactive pointer (synthetic event) */ }
 
   const onMove = (ev) => {
@@ -505,7 +595,8 @@ function startCardDrag(e, mod, card, header) {
     header.removeEventListener('pointermove', onMove);
     header.removeEventListener('pointerup', onEnd);
     header.removeEventListener('pointercancel', onEnd);
-    if (moved) markDirty();
+    interacting = false;
+    if (moved) commit(); // one step per drag, not per pointermove
   };
   header.addEventListener('pointermove', onMove);
   header.addEventListener('pointerup', onEnd);
@@ -573,10 +664,10 @@ function removeWireEl(id) {
   wireEls.delete(id);
 }
 
+// Callers commit — replacing a wire is one undo step, not two.
 function removeWire(id) {
   state.wires = state.wires.filter((w) => w.id !== id);
   removeWireEl(id);
-  markDirty();
 }
 
 function addWire(from, to) {
@@ -586,7 +677,7 @@ function addWire(from, to) {
   const w = { id: nextId('w'), from, to };
   state.wires.push(w);
   renderWire(w);
-  markDirty();
+  commit();
 }
 
 function startWireDrag(e, moduleId, portName, portEl) {
@@ -596,6 +687,7 @@ function startWireDrag(e, moduleId, portName, portEl) {
   try { portEl.setPointerCapture(e.pointerId); } catch { /* inactive pointer (synthetic event) */ }
   // input ports only accept pointer events while a wire is being dragged
   document.body.classList.add('wiring');
+  interacting = true;
   let target = null; // highlighted input port element under the pointer
 
   const onMove = (ev) => {
@@ -617,14 +709,16 @@ function startWireDrag(e, moduleId, portName, portEl) {
     portEl.removeEventListener('pointercancel', cleanup);
     dom.ghost.setAttribute('d', '');
     document.body.classList.remove('wiring');
+    interacting = false;
     if (target) target.classList.remove('drop-target');
   };
   const onUp = () => {
-    if (target) {
-      addWire({ module: moduleId, port: portName },
-        { module: target.dataset.module, port: target.dataset.port });
-    }
+    const drop = target;
     cleanup();
+    if (drop) {
+      addWire({ module: moduleId, port: portName },
+        { module: drop.dataset.module, port: drop.dataset.port });
+    }
   };
   portEl.addEventListener('pointermove', onMove);
   portEl.addEventListener('pointerup', onUp);
@@ -644,19 +738,54 @@ function select(sel) {
   renderDebugger();
 }
 
+// A text field owns its own undo stack and caret keys; a <select> does not,
+// so graph shortcuts still apply there.
+function isTextField(node) {
+  return !!node && (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.isContentEditable);
+}
+
+function isFormField(node) {
+  return isTextField(node) || (!!node && node.tagName === 'SELECT');
+}
+
 function bindKeys() {
   document.addEventListener('keydown', (e) => {
+    const z = e.key === 'z' || e.key === 'Z';
+    const y = e.key === 'y' || e.key === 'Y';
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && (z || y)) {
+      // inside a text field the browser's own undo must win
+      if (isTextField(document.activeElement)) return;
+      e.preventDefault();
+      if (y || e.shiftKey) redo(); else undo();
+      return;
+    }
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
-    const a = document.activeElement;
-    if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' ||
-              a.isContentEditable)) return;
+    if (isFormField(document.activeElement)) return;
     const sel = state.selection;
     if (!sel) return;
     e.preventDefault();
-    if (sel.kind === 'wire') removeWire(sel.id);
-    else removeModule(sel.id);
+    if (sel.kind === 'wire') {
+      removeWire(sel.id);
+      commit();
+    } else {
+      removeModule(sel.id);
+    }
     select(null);
   });
+
+  // leaving a field ends its coalescing run, so returning to it later is a
+  // separate undo step
+  document.addEventListener('focusout', () => { history.lastKey = null; });
+
+  // Safety net: a drag whose pointerup never reaches the captured element
+  // would otherwise leave the editor stuck mid-gesture — undo disabled and
+  // input ports still swallowing clicks.
+  for (const type of ['pointerup', 'pointercancel']) {
+    document.addEventListener(type, () => {
+      interacting = false;
+      document.body.classList.remove('wiring');
+    }, true);
+  }
 }
 
 /* ---------- full pipe render ---------- */
@@ -832,8 +961,10 @@ function dbgItemCard(item) {
 function bindTopbar() {
   dom.pipeName.addEventListener('input', () => {
     state.name = dom.pipeName.value;
-    markDirty();
+    commit('name');
   });
+  dom.undo.addEventListener('click', undo);
+  dom.redo.addEventListener('click', redo);
   $('#btn-run').addEventListener('click', runPipe);
   $('#btn-save').addEventListener('click', savePipe);
   $('#btn-new').addEventListener('click', newPipe);
@@ -872,9 +1003,14 @@ async function savePipe() {
   try {
     const body = { name: state.name, modules: state.modules, wires: state.wires };
     if (state.savedId) body.id = state.savedId;
+    // what the request actually carries — an edit made while it is in flight
+    // must not be counted as saved
+    const sentRev = history.stack[history.index].rev;
+    history.lastKey = null; // typing on either side of a save is not one step
     const res = await postJSON('/api/pipes', body);
     state.savedId = res.id;
-    state.dirty = false;
+    history.savedRev = sentRev;
+    syncHistoryUI();
     updateOpenRss();
     toast('保存しました');
   } catch (err) {
@@ -895,12 +1031,12 @@ function newPipe() {
   state.modules = [];
   state.wires = [];
   state.savedId = null;
-  state.dirty = false;
   state.counter = 1;
   state.selection = null;
   state.lastDebug = null;
   state.runParams = {};
   renderPipe();
+  resetHistory(); // a fresh document, not an undoable edit
 }
 
 async function toggleLoadMenu() {
@@ -943,12 +1079,12 @@ async function loadPipe(id) {
     state.modules = clean.modules;
     state.wires = clean.wires;
     state.savedId = pipe.id || id;
-    state.dirty = false;
     state.selection = null;
     state.lastDebug = null;
     state.runParams = {};
     seedCounter();
     renderPipe();
+    resetHistory(); // history belongs to the document you opened
   } catch (err) {
     toast('読み込みエラー: ' + err.message, 'error');
   }
