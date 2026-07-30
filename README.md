@@ -105,6 +105,7 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 | GET | `/api/pipes/:id` | 保存ファイルの JSON(存在しなければ 404 `{error}`) |
 | DELETE | `/api/pipes/:id` | `{ ok: true }` |
 | GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で JSON)。`format` 以外のクエリはパイプパラメータになる |
+| GET | `/api/config` | `{ readOnly, authRequired }`(常に認証不要) |
 
 ## デモパイプ
 
@@ -122,6 +123,21 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 例外は 2 つあります。1 つはアプリ自身のオリジンで、`/demo/tech.xml` のような相対 URL が同梱デモを取得できるのはこのためです。もう 1 つは環境変数で、社内フィードを集約するなど意図がある場合は `OPENPIPES_ALLOW_PRIVATE=1` で無効化できます。
 
 なお、検査は接続前に行うため、検査時と接続時で名前解決の結果が変わる攻撃(DNS リバインディング)までは防げません。
+
+### 認証と読み取り専用
+
+どちらも既定では無効なので、手元で `node server.js` する分にはこれまでどおりです。
+
+- `OPENPIPES_PASSWORD` を設定すると HTTP Basic 認証を要求します(ユーザー名は `OPENPIPES_USER`、既定 `admin`)。照合は SHA-256 を通してから行うので、長さや先頭一致が処理時間から漏れません
+- `OPENPIPES_READONLY=1` は保存済みパイプを変更する操作(`POST /api/pipes` と `DELETE /api/pipes/:id`)を 403 で拒否します。パスワードの有無とは独立です
+
+```sh
+OPENPIPES_PASSWORD=秘密 OPENPIPES_READONLY=1 node server.js
+```
+
+パスワードを設定しても、**公開フィード `/pipes/<id>/run` と同梱デモ `/demo/*.xml` は認証不要のまま**です。前者は RSS リーダーがログインできないため、後者は相対 URL を使うパイプでサーバーが自分自身から取得するためで、ここを閉じると機能そのものが壊れます。エディタ本体と残りの `/api/*` は認証の内側に入ります。
+
+読み取り専用のときはエディタの「保存」ボタンと読み込みメニューの削除ボタンが消えます。
 
 ## テスト
 

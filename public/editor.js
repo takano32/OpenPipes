@@ -22,6 +22,7 @@ const state = {
   runParams: {},       // user-input values, kept across runs
   dbgJson: false,
   dbgCollapsed: false,
+  config: { readOnly: false },
 };
 
 /*
@@ -213,6 +214,16 @@ async function init() {
   dom.loadMenu = $('#load-menu');
   dom.undo = $('#btn-undo');
   dom.redo = $('#btn-redo');
+
+  try {
+    state.config = await api('/api/config');
+  } catch { /* an older server: assume everything is allowed */ }
+  if (state.config.readOnly) {
+    const save = $('#btn-save');
+    save.disabled = true;
+    save.title = 'このインスタンスは読み取り専用です';
+    document.body.classList.add('read-only');
+  }
 
   try {
     state.catalog = await api('/api/modules');
@@ -1056,14 +1067,17 @@ async function toggleLoadMenu() {
     }
     for (const p of list) {
       const label = p.name || p.id;
-      const del = el('button', {
-        class: 'menu-del', type: 'button', text: '×',
-        title: `「${label}」を削除`, 'aria-label': `${label} を削除`,
-      });
-      del.addEventListener('click', (e) => {
-        e.stopPropagation(); // the row itself loads the pipe
-        deletePipe(p.id, label);
-      });
+      let del = null;
+      if (!state.config.readOnly) {
+        del = el('button', {
+          class: 'menu-del', type: 'button', text: '×',
+          title: `「${label}」を削除`, 'aria-label': `${label} を削除`,
+        });
+        del.addEventListener('click', (e) => {
+          e.stopPropagation(); // the row itself loads the pipe
+          deletePipe(p.id, label);
+        });
+      }
       const row = el('div', { class: 'menu-item' },
         el('span', { class: 'menu-name', text: label }),
         el('span', { class: 'menu-date', text: p.savedAt ? new Date(p.savedAt).toLocaleString() : '' }),

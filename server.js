@@ -20,6 +20,12 @@ const PORT = Number(process.env.PORT) || 3000;
 // refused unless the operator opts in (a LAN-only deployment aggregating an
 // intranet feed is a legitimate reason to).
 const ALLOW_PRIVATE = process.env.OPENPIPES_ALLOW_PRIVATE === '1';
+// Set OPENPIPES_PASSWORD to require Basic auth for the editor and everything
+// behind it. Unset means open, which is what a local `node server.js` wants.
+const AUTH_USER = process.env.OPENPIPES_USER || 'admin';
+const AUTH_PASSWORD = process.env.OPENPIPES_PASSWORD || '';
+// Refuses to modify stored pipes at all, whether or not a password is set.
+const READ_ONLY = process.env.OPENPIPES_READONLY === '1';
 const MAX_BODY_BYTES = 1024 * 1024;
 const PIPE_ID_RE = /^[a-z0-9-]{1,64}$/;
 
@@ -34,10 +40,36 @@ const CONTENT_TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-function httpError(status, message) {
+function httpError(status, message, headers) {
   const err = new Error(message);
   err.status = status;
+  if (headers) err.headers = headers;
   return err;
+}
+
+// Hashing first so the comparison is over equal-length buffers whatever the
+// inputs were.
+function secretEquals(a, b) {
+  const digest = (v) => crypto.createHash('sha256').update(String(v), 'utf8').digest();
+  return crypto.timingSafeEqual(digest(a), digest(b));
+}
+
+function requireAuth(req) {
+  if (!AUTH_PASSWORD) return;
+  const unauthorized = () => httpError(401, 'Authentication required',
+    { 'WWW-Authenticate': 'Basic realm="OpenPipes", charset="UTF-8"' });
+  const [scheme, encoded] = String(req.headers.authorization || '').split(' ');
+  if (!/^basic$/i.test(scheme || '') || !encoded) throw unauthorized();
+  const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+  const sep = decoded.indexOf(':');
+  if (sep === -1) throw unauthorized();
+  const user = secretEquals(decoded.slice(0, sep), AUTH_USER);
+  const pass = secretEquals(decoded.slice(sep + 1), AUTH_PASSWORD);
+  if (!user || !pass) throw unauthorized();
+}
+
+function requireWritable() {
+  if (READ_ONLY) throw httpError(403, 'This OpenPipes instance is read-only');
 }
 
 function sendJSON(res, status, body) {
@@ -125,6 +157,11 @@ async function serveFile(res, rootDir, relPath) {
 
 async function handleModules(req, res) {
   sendJSON(res, 200, catalog());
+}
+
+// What the editor needs to know about how this instance is configured.
+async function handleConfig(req, res) {
+  sendJSON(res, 200, { readOnly: READ_ONLY, authRequired: Boolean(AUTH_PASSWORD) });
 }
 
 async function handleRunAdHoc(req, res) {
@@ -261,15 +298,20 @@ async function handleStatic(req, res, match) {
   await serveFile(res, PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname.slice(1));
 }
 
+// `public` routes stay reachable without credentials: a published feed has to
+// be readable by an RSS client, and the engine fetches /demo/*.xml over HTTP
+// from itself when a pipe uses a relative URL.
+// `writes` routes are the ones read-only mode refuses.
 const ROUTES = [
+  { method: 'GET', pattern: /^\/api\/config$/, handler: handleConfig, public: true },
   { method: 'GET', pattern: /^\/api\/modules$/, handler: handleModules },
   { method: 'POST', pattern: /^\/api\/run$/, handler: handleRunAdHoc },
   { method: 'GET', pattern: /^\/api\/pipes$/, handler: handleListPipes },
-  { method: 'POST', pattern: /^\/api\/pipes$/, handler: handleSavePipe },
+  { method: 'POST', pattern: /^\/api\/pipes$/, handler: handleSavePipe, writes: true },
   { method: 'GET', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleGetPipe },
-  { method: 'DELETE', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleDeletePipe },
-  { method: 'GET', pattern: /^\/pipes\/([^/]+)\/run$/, handler: handleRunSaved },
-  { method: 'GET', pattern: /^\/demo\/([^/]+\.xml)$/, handler: handleDemoFile },
+  { method: 'DELETE', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleDeletePipe, writes: true },
+  { method: 'GET', pattern: /^\/pipes\/([^/]+)\/run$/, handler: handleRunSaved, public: true },
+  { method: 'GET', pattern: /^\/demo\/([^/]+\.xml)$/, handler: handleDemoFile, public: true },
   { method: 'GET', pattern: /^\/.*$/, handler: handleStatic },
 ];
 
@@ -288,6 +330,8 @@ async function dispatch(req, res) {
     if (route.method !== req.method) continue;
     const match = pathname.match(route.pattern);
     if (!match) continue;
+    if (!route.public) requireAuth(req);
+    if (route.writes) requireWritable();
     await route.handler(req, res, match, url);
     return;
   }
@@ -305,6 +349,9 @@ const server = http.createServer((req, res) => {
     if (res.headersSent) {
       res.destroy();
       return;
+    }
+    for (const [name, value] of Object.entries(err?.headers || {})) {
+      res.setHeader(name, value);
     }
     sendJSON(res, status, { error: err?.message || 'Internal server error' });
   });
@@ -324,5 +371,10 @@ server.on('error', (err) => {
   process.exit(1);
 });
 server.listen(PORT, () => {
-  console.log(`OpenPipes listening on http://localhost:${PORT}`);
+  const notes = [];
+  if (AUTH_PASSWORD) notes.push(`auth as "${AUTH_USER}"`);
+  if (READ_ONLY) notes.push('read-only');
+  if (ALLOW_PRIVATE) notes.push('private addresses allowed');
+  console.log(`OpenPipes listening on http://localhost:${PORT}` +
+    (notes.length ? ` (${notes.join(', ')})` : ''));
 });

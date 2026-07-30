@@ -342,7 +342,27 @@ export function buildRSS({ title, link, description, items }) // -> RSS 2.0 XML 
 | POST   | `/api/pipes`          | body `{ id?, name, modules, wires }` → saves, returns `{ id }` (new id when none given). Rejects (400) modules that aren't objects with string `id`/`type`, duplicate module ids, non-object `params`, and wires without `from`/`to` objects — a saved file the editor cannot render must never be creatable |
 | GET    | `/api/pipes/:id`      | full saved file JSON, 404 `{error}` if missing |
 | DELETE | `/api/pipes/:id`      | `{ ok: true }` |
+| GET    | `/api/config`         | `{ readOnly, authRequired }` — what the editor needs to know about this instance. Always public |
 | GET    | `/pipes/:id/run`      | executes saved pipe. `?format=json` → `{ items }`; default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
+
+### Access control
+
+Both knobs are off by default, so `node server.js` behaves as it always has.
+
+- `OPENPIPES_PASSWORD` (with `OPENPIPES_USER`, default `admin`) requires HTTP
+  Basic auth. Credentials are compared after SHA-256 so the check is over
+  equal-length buffers and does not leak length or prefix by timing.
+- `OPENPIPES_READONLY=1` refuses anything that modifies a stored pipe (`POST
+  /api/pipes`, `DELETE /api/pipes/:id`) with 403, whether or not a password is
+  set. Auth is checked first, so an unauthenticated write gets 401, not 403.
+
+Two routes are marked `public` and stay reachable without credentials, because
+requiring them would break the feature: `/pipes/:id/run`, which an RSS client
+has no way to authenticate to, and `/demo/*.xml`, which the engine fetches over
+HTTP from itself whenever a pipe uses a relative URL. `/api/config` is public
+too so the editor can render its read-only state before authenticating.
+Everything else — the editor page, its assets, and the rest of `/api/*` — is
+behind the password when one is set.
 
 Implementation notes: hand-rolled router (method + regex table). JSON bodies
 limited to 1 MB. Pipe ids validated `[a-z0-9-]{1,64}` before touching the
