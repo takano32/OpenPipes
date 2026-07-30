@@ -1,0 +1,13 @@
+{
+  "name": "openpipes",
+  "version": "0.1.0",
+  "description": "A Yahoo! Pipes clone: visual feed mashup editor and engine",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run-tests.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

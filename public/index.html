@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenPipes</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔀</text></svg>">
+<link rel="stylesheet" href="/editor.css">
+<script src="/editor.js" defer></script>
+</head>
+<body>
+<header id="topbar">
+  <div id="logo"><span>Open</span>Pipes</div>
+  <input id="pipe-name" type="text" placeholder="パイプ名" spellcheck="false">
+  <a id="open-rss" target="_blank" rel="noopener" hidden>Open RSS ↗</a>
+  <div class="spacer"></div>
+  <button id="btn-new" class="btn" type="button">新規</button>
+  <div id="load-wrap">
+    <button id="btn-load" class="btn" type="button">読み込み ▾</button>
+    <div id="load-menu" hidden></div>
+  </div>
+  <button id="btn-save" class="btn" type="button">保存</button>
+  <button id="btn-run" class="btn primary" type="button">実行 ▶</button>
+</header>
+
+<main id="workspace">
+  <aside id="palette"></aside>
+  <section id="center">
+    <div id="canvas-wrap">
+      <div id="canvas">
+        <svg id="wires" width="4000" height="3000" xmlns="http://www.w3.org/2000/svg">
+          <path id="ghost-wire" class="ghost-wire" d=""></path>
+        </svg>
+        <div id="canvas-hint">左のパレットからモジュールをドラッグして配置し、<br>下側のポートから次のモジュールの上側のポートへ線をつなぎます</div>
+      </div>
+    </div>
+    <div id="params-strip" hidden></div>
+    <div id="debugger">
+      <div id="debugger-header">
+        <span id="dbg-caret">▾</span>
+        <span id="dbg-title">デバッガー</span>
+        <button id="dbg-json-toggle" type="button" hidden>JSON</button>
+      </div>
+      <div id="debugger-body">
+        <div class="dbg-empty">モジュールを選択し、実行 ▶ を押すと結果が表示されます</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="toasts"></div>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>OpenPipes Demo: World News</title>
+    <link>https://example.com/world</link>
+    <description>Fictional world headlines bundled with OpenPipes for demos and testing.</description>
+    <language>en-us</language>
+    <item>
+      <title>Heatwave Eases Across Southern Europe as Atlantic Rains Arrive</title>
+      <link>https://example.com/world/heatwave-eases</link>
+      <description>Temperatures dropped below 30C for the first time in three weeks, giving exhausted firefighting crews a chance to contain the remaining hotspots.</description>
+      <guid>https://example.com/world/heatwave-eases</guid>
+      <category>Weather</category>
+      <pubDate>Wed, 29 Jul 2026 06:50:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Global Markets Rally After Central Banks Hold Rates Steady</title>
+      <link>https://example.com/world/markets-rally</link>
+      <description>Equity indexes climbed to a six-month high as policymakers on three continents signalled that the tightening cycle has ended.</description>
+      <guid>https://example.com/world/markets-rally</guid>
+      <category>Economy</category>
+      <pubDate>Tue, 28 Jul 2026 15:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Underdogs Stun Champions in Continental Cup Semifinal</title>
+      <link>https://example.com/world/cup-semifinal-upset</link>
+      <description>A stoppage-time header sent the tournament's lowest-ranked side into their first final, ending the holders' 21-match unbeaten run.</description>
+      <guid>https://example.com/world/cup-semifinal-upset</guid>
+      <category>Sports</category>
+      <pubDate>Mon, 27 Jul 2026 21:15:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Coastal Cities Deploy Early-Warning Buoys Ahead of Storm Season</title>
+      <link>https://example.com/world/storm-buoys</link>
+      <description>A network of solar-powered buoys will stream wave and pressure data to forecasters, promising up to six extra hours of evacuation lead time.</description>
+      <guid>https://example.com/world/storm-buoys</guid>
+      <category>Weather</category>
+      <pubDate>Sun, 26 Jul 2026 09:05:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Grain Prices Fall as Harvest Forecasts Improve Worldwide</title>
+      <link>https://example.com/world/grain-prices-fall</link>
+      <description>Wheat futures slid 8 percent after agencies raised yield estimates for the three largest exporters, easing food-inflation concerns.</description>
+      <guid>https://example.com/world/grain-prices-fall</guid>
+      <category>Economy</category>
+      <pubDate>Fri, 24 Jul 2026 12:25:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Marathon World Record Falls on Rain-Soaked City Course</title>
+      <link>https://example.com/world/marathon-record</link>
+      <description>Despite steady drizzle, the 24-year-old champion shaved eleven seconds off the record, crediting a conservative first half and a late surge.</description>
+      <guid>https://example.com/world/marathon-record</guid>
+      <category>Sports</category>
+      <pubDate>Thu, 23 Jul 2026 17:45:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Trade Talks Resume With Green Tariffs Topping the Agenda</title>
+      <link>https://example.com/world/trade-talks-resume</link>
+      <description>Negotiators returned to the table to discuss carbon border fees, with island nations pressing for exemptions on climate-adaptation goods.</description>
+      <guid>https://example.com/world/trade-talks-resume</guid>
+      <category>Economy</category>
+      <pubDate>Tue, 21 Jul 2026 08:15:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Record Monsoon Rains Refill Reservoirs Across South Asia</title>
+      <link>https://example.com/world/monsoon-reservoirs</link>
+      <description>Two weeks of above-average rainfall pushed major reservoirs past 90 percent capacity, ending water rationing in several metropolitan areas.</description>
+      <guid>https://example.com/world/monsoon-reservoirs</guid>
+      <category>Weather</category>
+      <pubDate>Mon, 20 Jul 2026 05:40:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>OpenPipes Demo: Tech News</title>
+    <link>https://example.com/tech</link>
+    <description>Fictional technology headlines bundled with OpenPipes for demos and testing.</description>
+    <language>en-us</language>
+    <item>
+      <title>OpenWeave AI Assistant Learns to Debug Its Own Pipelines</title>
+      <link>https://example.com/tech/openweave-ai-debug</link>
+      <description>The OpenWeave team demonstrated an AI assistant that inspects failing data pipelines, proposes patches, and applies them behind a human review gate.</description>
+      <guid>https://example.com/tech/openweave-ai-debug</guid>
+      <category>AI</category>
+      <pubDate>Wed, 29 Jul 2026 08:30:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Rust 2.0 Roadmap Promises Dramatically Faster Compile Times</title>
+      <link>https://example.com/tech/rust-2-roadmap</link>
+      <description>Core maintainers outlined a two-year plan featuring incremental codegen caching that cut clean build times by 40 percent in early benchmarks.</description>
+      <guid>https://example.com/tech/rust-2-roadmap</guid>
+      <category>Languages</category>
+      <pubDate>Tue, 28 Jul 2026 14:05:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Linux Kernel 7.1 Ships With Built-In Rollback Snapshots</title>
+      <link>https://example.com/tech/linux-7-1-snapshots</link>
+      <description>The new release integrates filesystem-agnostic rollback points, letting distributions undo a bad update without a separate snapshot manager.</description>
+      <guid>https://example.com/tech/linux-7-1-snapshots</guid>
+      <category>Operating Systems</category>
+      <pubDate>Mon, 27 Jul 2026 09:45:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Startup Nimbus Unveils AI Inference Chip That Sips Two Watts</title>
+      <link>https://example.com/tech/nimbus-ai-chip</link>
+      <description>Nimbus claims its edge accelerator runs mid-sized language models on battery power, targeting drones, wearables, and remote sensors.</description>
+      <guid>https://example.com/tech/nimbus-ai-chip</guid>
+      <category>Hardware</category>
+      <pubDate>Sun, 26 Jul 2026 11:20:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Quantum Cloud Beta Opens to Independent Researchers</title>
+      <link>https://example.com/tech/quantum-cloud-beta</link>
+      <description>A 256-qubit machine is now reachable through a free tier, with queue priority granted to reproducibility studies and open datasets.</description>
+      <guid>https://example.com/tech/quantum-cloud-beta</guid>
+      <category>Quantum</category>
+      <pubDate>Sat, 25 Jul 2026 16:40:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Draft AI Regulation Would Require Model Audit Trails</title>
+      <link>https://example.com/tech/ai-regulation-audit</link>
+      <description>Lawmakers circulated a proposal obliging providers of large models to retain training provenance records and expose them to accredited auditors.</description>
+      <guid>https://example.com/tech/ai-regulation-audit</guid>
+      <category>AI</category>
+      <pubDate>Thu, 23 Jul 2026 07:55:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Browser Makers Agree on a Common WebGPU Baseline Profile</title>
+      <link>https://example.com/tech/webgpu-baseline</link>
+      <description>After a year of interop tests, the four major engines committed to an identical feature floor, simplifying life for game and ML developers.</description>
+      <guid>https://example.com/tech/webgpu-baseline</guid>
+      <category>Web</category>
+      <pubDate>Wed, 22 Jul 2026 13:10:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Solar-Powered Data Center Runs a Full Week Off-Grid</title>
+      <link>https://example.com/tech/solar-datacenter</link>
+      <description>An experimental facility in the desert stayed online for seven days using panels and iron-flow batteries, shifting batch jobs to daylight hours.</description>
+      <guid>https://example.com/tech/solar-datacenter</guid>
+      <category>Infrastructure</category>
+      <pubDate>Mon, 20 Jul 2026 10:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

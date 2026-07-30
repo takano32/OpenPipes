@@ -1,0 +1,122 @@
+{
+  "id": "demo-tech-filter",
+  "name": "デモ: テックニュース絞り込み",
+  "savedAt": "2026-07-30T00:00:00.000Z",
+  "modules": [
+    {
+      "id": "m1",
+      "type": "text_input",
+      "params": {
+        "name": "q",
+        "prompt": "キーワード",
+        "default": "AI"
+      },
+      "x": 40,
+      "y": 40
+    },
+    {
+      "id": "m2",
+      "type": "fetch_feed",
+      "params": {
+        "urls": [
+          "/demo/tech.xml"
+        ]
+      },
+      "x": 340,
+      "y": 40
+    },
+    {
+      "id": "m3",
+      "type": "filter",
+      "params": {
+        "mode": "permit",
+        "combine": "all",
+        "rules": [
+          {
+            "field": "title",
+            "op": "contains",
+            "value": "${q}"
+          }
+        ]
+      },
+      "x": 340,
+      "y": 210
+    },
+    {
+      "id": "m4",
+      "type": "sort",
+      "params": {
+        "rules": [
+          {
+            "field": "pubDate",
+            "dir": "desc"
+          }
+        ]
+      },
+      "x": 340,
+      "y": 500
+    },
+    {
+      "id": "m5",
+      "type": "truncate",
+      "params": {
+        "count": 5
+      },
+      "x": 340,
+      "y": 685
+    },
+    {
+      "id": "m6",
+      "type": "output",
+      "params": {},
+      "x": 340,
+      "y": 845
+    }
+  ],
+  "wires": [
+    {
+      "id": "w1",
+      "from": {
+        "module": "m2",
+        "port": "out"
+      },
+      "to": {
+        "module": "m3",
+        "port": "in"
+      }
+    },
+    {
+      "id": "w2",
+      "from": {
+        "module": "m3",
+        "port": "out"
+      },
+      "to": {
+        "module": "m4",
+        "port": "in"
+      }
+    },
+    {
+      "id": "w3",
+      "from": {
+        "module": "m4",
+        "port": "out"
+      },
+      "to": {
+        "module": "m5",
+        "port": "in"
+      }
+    },
+    {
+      "id": "w4",
+      "from": {
+        "module": "m5",
+        "port": "out"
+      },
+      "to": {
+        "module": "m6",
+        "port": "in"
+      }
+    }
+  ]
+}

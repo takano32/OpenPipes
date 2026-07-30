@@ -1,0 +1,123 @@
+{
+  "id": "demo-merged",
+  "name": "デモ: フィードのマージ",
+  "savedAt": "2026-07-30T00:00:00.000Z",
+  "modules": [
+    {
+      "id": "m1",
+      "type": "fetch_feed",
+      "params": {
+        "urls": [
+          "/demo/tech.xml"
+        ]
+      },
+      "x": 140,
+      "y": 40
+    },
+    {
+      "id": "m2",
+      "type": "fetch_feed",
+      "params": {
+        "urls": [
+          "/demo/world.xml"
+        ]
+      },
+      "x": 560,
+      "y": 40
+    },
+    {
+      "id": "m3",
+      "type": "union",
+      "params": {},
+      "x": 340,
+      "y": 230
+    },
+    {
+      "id": "m4",
+      "type": "unique",
+      "params": {
+        "field": "title"
+      },
+      "x": 340,
+      "y": 350
+    },
+    {
+      "id": "m5",
+      "type": "sort",
+      "params": {
+        "rules": [
+          {
+            "field": "pubDate",
+            "dir": "desc"
+          }
+        ]
+      },
+      "x": 340,
+      "y": 510
+    },
+    {
+      "id": "m6",
+      "type": "output",
+      "params": {},
+      "x": 340,
+      "y": 700
+    }
+  ],
+  "wires": [
+    {
+      "id": "w1",
+      "from": {
+        "module": "m1",
+        "port": "out"
+      },
+      "to": {
+        "module": "m3",
+        "port": "in1"
+      }
+    },
+    {
+      "id": "w2",
+      "from": {
+        "module": "m2",
+        "port": "out"
+      },
+      "to": {
+        "module": "m3",
+        "port": "in2"
+      }
+    },
+    {
+      "id": "w3",
+      "from": {
+        "module": "m3",
+        "port": "out"
+      },
+      "to": {
+        "module": "m4",
+        "port": "in"
+      }
+    },
+    {
+      "id": "w4",
+      "from": {
+        "module": "m4",
+        "port": "out"
+      },
+      "to": {
+        "module": "m5",
+        "port": "in"
+      }
+    },
+    {
+      "id": "w5",
+      "from": {
+        "module": "m5",
+        "port": "out"
+      },
+      "to": {
+        "module": "m6",
+        "port": "in"
+      }
+    }
+  ]
+}
