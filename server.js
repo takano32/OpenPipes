@@ -131,6 +131,7 @@ async function handleRunAdHoc(req, res) {
   const result = await runPipe(body.pipe, {
     params: body.params || {},
     baseUrl: baseUrlOf(req),
+    loadPipe, // the Loop module runs a saved pipe per item
   });
   sendJSON(res, 200, result);
 }
@@ -225,7 +226,7 @@ async function handleRunSaved(req, res, match, url) {
     if (key !== 'format') params[key] = value;
   }
 
-  const result = await runPipe(pipe, { params, baseUrl: baseUrlOf(req) });
+  const result = await runPipe(pipe, { params, baseUrl: baseUrlOf(req), loadPipe });
   if (Array.isArray(result.errors) && result.errors.length > 0) {
     throw httpError(502, result.errors.map((e) => `${e.module}: ${e.message}`).join('; '));
   }

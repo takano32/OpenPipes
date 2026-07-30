@@ -234,14 +234,14 @@ test('buildRSS: RFC 822 pubDate, guid, atom:link self', () => {
 
 // ---------------------------------------------------------------- catalog
 
-test('catalog: all 22 module types with expected port layout', () => {
+test('catalog: all 23 module types with expected port layout', () => {
   const cat = catalog();
   assert.deepEqual(
     cat.map((d) => d.type).sort(),
     ['count', 'date_builder', 'fetch_feed', 'fetch_json', 'filter', 'item_builder',
-      'number_input', 'output', 'regex', 'rename', 'reverse', 'sort', 'string_builder',
-      'strip_html', 'sub_element', 'tail', 'text_input', 'truncate', 'union', 'unique',
-      'url_builder', 'url_input'],
+      'loop', 'number_input', 'output', 'regex', 'rename', 'reverse', 'sort',
+      'string_builder', 'strip_html', 'sub_element', 'tail', 'text_input', 'truncate',
+      'union', 'unique', 'url_builder', 'url_input'],
   );
   const filter = cat.find((d) => d.type === 'filter');
   assert.deepEqual(filter.inputs.map((p) => p.name), ['in']);
@@ -614,6 +614,120 @@ test('strip_html: missing fields are skipped, several fields at once', async () 
     [{ title: '<i>a</i>' }],
     [mod('s', 'strip_html', { fields: ['title', 'description'] })]);
   assert.deepEqual(items, [{ title: 'a' }]);
+});
+
+// --------------------------------------------------------------------- loop
+
+const SUB_PIPE = {
+  name: 'sub',
+  modules: [
+    mod('s', 'item_builder', { fields: [{ name: 'title', value: 'sub of ${title}' }, { name: 'src', value: '${link}' }] }),
+    mod('o', 'output'),
+  ],
+  wires: [wire('s', 'o')],
+};
+const loadSub = async (id) => {
+  if (id === 'sub') return SUB_PIPE;
+  throw new Error('Pipe not found: ' + id);
+};
+
+function loopPipe(loopParams, items = [{ title: 'A', link: 'http://a' }]) {
+  return {
+    name: 'outer',
+    modules: [
+      mod('src', 'fetch_json', { url: jsonSource(items), path: '' }),
+      mod('L', 'loop', loopParams),
+      mod('o', 'output'),
+    ],
+    wires: [wire('src', 'L'), wire('L', 'o')],
+  };
+}
+
+test('loop: replace mode swaps each item for its sub-pipe output', async () => {
+  const { items, errors } = await runPipe(
+    loopPipe({ pipe: 'sub', mode: 'replace', to: 'items', limit: 20 }),
+    { fetcher, loadPipe: loadSub });
+  assert.deepEqual(errors, []);
+  assert.deepEqual(items, [{ title: 'sub of A', src: 'http://a' }]);
+});
+
+test('loop: assign mode keeps the item and nests the results', async () => {
+  const { items } = await runPipe(
+    loopPipe({ pipe: 'sub', mode: 'assign', to: 'found', limit: 20 }),
+    { fetcher, loadPipe: loadSub });
+  assert.deepEqual(items, [{
+    title: 'A', link: 'http://a',
+    found: [{ title: 'sub of A', src: 'http://a' }],
+  }]);
+});
+
+test('loop: runs once per item and keeps input order', async () => {
+  const { items } = await runPipe(
+    loopPipe({ pipe: 'sub', mode: 'replace', to: 'i', limit: 20 },
+      [{ title: 'a' }, { title: 'b' }, { title: 'c' }]),
+    { fetcher, loadPipe: loadSub });
+  assert.deepEqual(titles(items), ['sub of a', 'sub of b', 'sub of c']);
+});
+
+test('loop: an empty pipe id passes items through untouched', async () => {
+  const { items, errors } = await runPipe(
+    loopPipe({ pipe: '', mode: 'replace', to: 'i', limit: 20 }),
+    { fetcher, loadPipe: loadSub });
+  assert.deepEqual(errors, []);
+  assert.deepEqual(items, [{ title: 'A', link: 'http://a' }]);
+});
+
+test('loop: the item limit is reported rather than silently dropping', async () => {
+  const { items, errors } = await runPipe(
+    loopPipe({ pipe: 'sub', mode: 'replace', to: 'i', limit: 2 },
+      [{ title: 'a' }, { title: 'b' }, { title: 'c' }]),
+    { fetcher, loadPipe: loadSub });
+  assert.equal(items.length, 2);
+  assert.match(errors[0].message, /stopped after 2 of 3 items/);
+});
+
+test('loop: a missing sub-pipe is a module error, not a crash', async () => {
+  const { items, errors } = await runPipe(
+    loopPipe({ pipe: 'nope', mode: 'replace', to: 'i', limit: 20 }),
+    { fetcher, loadPipe: loadSub });
+  assert.deepEqual(items, []);
+  assert.match(errors[0].message, /Pipe not found: nope/);
+});
+
+test('loop: a self-referencing pipe stops and says so', async () => {
+  const self = {
+    name: 'self',
+    modules: [
+      mod('a', 'item_builder', { fields: [{ name: 'title', value: 'x' }] }),
+      mod('L', 'loop', { pipe: 'self', mode: 'replace', to: 'i', limit: 5 }),
+      mod('o', 'output'),
+    ],
+    wires: [wire('a', 'L'), wire('L', 'o')],
+  };
+  const { errors } = await runPipe(self, { loadPipe: async () => self });
+  assert.match(errors[0].message, /already running/);
+});
+
+test('loop: errors inside the sub-pipe surface on the loop module', async () => {
+  const bad = {
+    name: 'bad',
+    modules: [
+      mod('a', 'item_builder', { fields: [{ name: 'title', value: 'x' }] }),
+      mod('r', 'regex', { rules: [{ field: 'title', pattern: '([', replace: '', flags: '' }] }),
+      mod('o', 'output'),
+    ],
+    wires: [wire('a', 'r'), wire('r', 'o')],
+  };
+  const { errors } = await runPipe(
+    loopPipe({ pipe: 'bad', mode: 'replace', to: 'i', limit: 20 }),
+    { fetcher, loadPipe: async () => bad });
+  assert.match(errors[0].message, /Loop item 1 \(r\)/);
+});
+
+test('loop: without a loader the module reports it is unavailable', async () => {
+  const { errors } = await runPipe(
+    loopPipe({ pipe: 'sub', mode: 'replace', to: 'i', limit: 20 }), { fetcher });
+  assert.match(errors[0].message, /no pipe loader/);
 });
 
 // ---------------------------------------------------------- hostile field paths
