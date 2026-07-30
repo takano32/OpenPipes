@@ -666,7 +666,9 @@ test('fetchURL: aborts a chunked response that passes maxBytes without buffering
     await assert.rejects(() => fetchURL(url, { maxBytes: 100_000 }), /exceeds 100000 bytes/);
     assert.ok(sent < 400 * chunk.length, 'must not have read the whole body');
   } finally {
-    server.close();
+    // a socket left open by the aborted read would keep the process alive
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

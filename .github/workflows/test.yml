@@ -1,0 +1,34 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        # the whole range package.json claims support for
+        node-version: ['18', '20', '22', '24']
+    name: node ${{ matrix.node-version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      # No install step: OpenPipes has zero dependencies, so there is
+      # nothing to fetch and no lockfile for `npm ci` to read.
+      - run: npm test
+
+      # public/editor.js runs in the browser, so the suite never loads it.
+      - name: Syntax-check the editor
+        run: node --check public/editor.js

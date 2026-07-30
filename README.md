@@ -1,5 +1,7 @@
 # OpenPipes
 
+[![test](https://github.com/takano32/OpenPipes/actions/workflows/test.yml/badge.svg)](https://github.com/takano32/OpenPipes/actions/workflows/test.yml)
+
 Yahoo! Pipes クローンです。ブラウザ上のビジュアルエディタでフィード処理パイプライン(「パイプ」)を組み立て、サーバーサイドのエンジンで実行し、結果を RSS 2.0 / JSON として再配信できます。
 
 - **依存パッケージゼロ** — Node.js >= 18 の標準機能のみ。フロントエンドも素の JS / CSS / HTML(CDN なし、ビルド不要)
@@ -102,3 +104,5 @@ npm test
 ```
 
 `test/run-tests.js` が実行されます。ネットワークアクセスは不要です(フィード取得はすべて偽の fetcher で差し替え)。
+
+GitHub Actions でも master への push と Pull Request のたびに Node.js 18 / 20 / 22 / 24 で同じテストを実行します(`.github/workflows/test.yml`)。
