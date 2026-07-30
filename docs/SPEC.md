@@ -243,7 +243,7 @@ export function catalog()                      // -> descriptor array (above)
 export async function runPipe(pipe, options)   // -> { items, debug, errors }
 ```
 
-`options`: `{ params?: {name: value}, fetcher?: async (url) => ({status, headers, text}), baseUrl?: string, debugLimit?: number (default 20), loadPipe?: async (id) => pipe, depth?: number, running?: Set<string> }`.
+`options`: `{ params?: {name: value}, fetcher?: async (url) => ({status, headers, text}), baseUrl?: string, debugLimit?: number (default 20), loadPipe?: async (id) => pipe, depth?: number, running?: Set<string>, allowPrivate?: boolean }`.
 `fetcher` defaults to `fetchURL` from feed.js; tests inject a fake. `loadPipe`
 is what `loop` calls to fetch a saved pipe — server.js passes its own loader,
 tests pass a canned one, and omitting it disables `loop` with a clear message.
@@ -301,7 +301,23 @@ export function buildRSS({ title, link, description, items }) // -> RSS 2.0 XML 
   The named-entity table has a null prototype, so `&constructor;` and friends
   stay literal instead of resolving an inherited `Object` member.
 - `fetchURL`: http/https only (reject others), resolves relative URLs against
-  `baseUrl`, follows redirects (fetch default), AbortController timeout.
+  `baseUrl`, AbortController timeout.
+  **Address filtering**: the hostname is resolved and every address checked;
+  loopback, private, link-local (including `169.254.169.254`), carrier-NAT,
+  documentation, multicast and reserved ranges are refused, in both IPv4 and
+  IPv6 (including `::ffff:` mapped and NAT64 forms). Anything not positively
+  identifiable as public unicast is refused — failing closed is the only safe
+  default. Two ways out: the origin of `baseUrl` is always allowed, which is
+  how a relative `/demo/tech.xml` reaches the app's own assets, and
+  `allowPrivate: true` disables the filter entirely (server.js sets it from
+  `OPENPIPES_ALLOW_PRIVATE=1`, for a deployment that really does aggregate an
+  intranet feed).
+  **Redirects are followed here, not by `fetch`** (max 5), and every hop is
+  checked: otherwise a public host answering `302 http://169.254.169.254/`
+  would walk straight past the filter. Residual gap: the address is checked
+  before connecting, so a name that resolves differently between the check and
+  the connection (DNS rebinding) is not covered — closing that needs pinning
+  the connection to the vetted IP, which the built-in `fetch` cannot express.
   Enforces `maxBytes` twice: on the declared `content-length`, then while
   streaming the body — the read is cancelled the moment the cap is passed, so a
   peer that omits `content-length` and streams gigabytes cannot exhaust memory.

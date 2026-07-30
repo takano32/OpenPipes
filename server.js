@@ -16,6 +16,10 @@ const PIPES_DIR = process.env.OPENPIPES_DATA
   : path.join(ROOT, 'data', 'pipes');
 
 const PORT = Number(process.env.PORT) || 3000;
+// Pipes fetch URLs chosen by whoever saved them, so non-public addresses are
+// refused unless the operator opts in (a LAN-only deployment aggregating an
+// intranet feed is a legitimate reason to).
+const ALLOW_PRIVATE = process.env.OPENPIPES_ALLOW_PRIVATE === '1';
 const MAX_BODY_BYTES = 1024 * 1024;
 const PIPE_ID_RE = /^[a-z0-9-]{1,64}$/;
 
@@ -131,6 +135,7 @@ async function handleRunAdHoc(req, res) {
   const result = await runPipe(body.pipe, {
     params: body.params || {},
     baseUrl: baseUrlOf(req),
+    allowPrivate: ALLOW_PRIVATE,
     loadPipe, // the Loop module runs a saved pipe per item
   });
   sendJSON(res, 200, result);
@@ -226,7 +231,8 @@ async function handleRunSaved(req, res, match, url) {
     if (key !== 'format') params[key] = value;
   }
 
-  const result = await runPipe(pipe, { params, baseUrl: baseUrlOf(req), loadPipe });
+  const result = await runPipe(pipe,
+    { params, baseUrl: baseUrlOf(req), allowPrivate: ALLOW_PRIVATE, loadPipe });
   if (Array.isArray(result.errors) && result.errors.length > 0) {
     throw httpError(502, result.errors.map((e) => `${e.module}: ${e.message}`).join('; '));
   }

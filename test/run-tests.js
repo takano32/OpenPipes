@@ -823,6 +823,56 @@ test('security: unknown entity names do not resolve inherited Object members', (
   assert.equal(feed.items[0].title, 'Ben & Jerry &constructor; ice');
 });
 
+test('security: isPrivateAddress classifies the ranges a pipe must not reach', async () => {
+  const { isPrivateAddress } = await import('../lib/feed.js');
+  for (const ip of [
+    '127.0.0.1', '10.1.2.3', '192.168.0.5', '172.16.0.1', '172.31.255.255',
+    '169.254.169.254', '100.64.0.1', '0.0.0.0', '224.0.0.1', '255.255.255.255',
+    '::1', '::', 'fc00::1', 'fd12:3456::1', 'fe80::1', 'ff02::1',
+    '::ffff:127.0.0.1', '::ffff:169.254.169.254', '64:ff9b::7f00:1', 'not-an-ip',
+  ]) {
+    assert.equal(isPrivateAddress(ip), true, `${ip} must be treated as private`);
+  }
+  for (const ip of [
+    '8.8.8.8', '1.1.1.1', '93.184.216.34', '172.32.0.1', '172.15.0.1', '11.0.0.1',
+    '2001:4860:4860::8888', '2606:4700::1111',
+  ]) {
+    assert.equal(isPrivateAddress(ip), false, `${ip} must be treated as public`);
+  }
+});
+
+test('security: fetchURL refuses loopback and cloud metadata', async () => {
+  const { fetchURL } = await import('../lib/feed.js');
+  await assert.rejects(() => fetchURL('http://127.0.0.1:9/x'), /non-public address/);
+  await assert.rejects(() => fetchURL('http://169.254.169.254/latest/'), /non-public address/);
+});
+
+test('security: a redirect into private space is caught on the next hop', async () => {
+  const http = await import('node:http');
+  const { fetchURL } = await import('../lib/feed.js');
+  const server = http.createServer((req, res) => {
+    if (req.url === '/redir') {
+      res.writeHead(302, { location: 'http://127.0.0.2:9/secret' });
+      res.end();
+    } else {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('ok');
+    }
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  try {
+    // baseUrl names the app's own origin, which is how /demo/tech.xml resolves
+    assert.equal((await fetchURL('/plain', { baseUrl: origin })).text, 'ok');
+    await assert.rejects(() => fetchURL('/redir', { baseUrl: origin }),
+      /non-public address \(127\.0\.0\.2\)/);
+    assert.equal((await fetchURL(`${origin}/plain`, { allowPrivate: true })).text, 'ok');
+  } finally {
+    server.closeAllConnections?.();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('fetchURL: aborts a chunked response that passes maxBytes without buffering it', async () => {
   const http = await import('node:http');
   const { fetchURL } = await import('../lib/feed.js');
@@ -841,8 +891,10 @@ test('fetchURL: aborts a chunked response that passes maxBytes without buffering
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
+    // allowPrivate: this is about the size cap, not the address filter
     const url = `http://127.0.0.1:${server.address().port}/big`;
-    await assert.rejects(() => fetchURL(url, { maxBytes: 100_000 }), /exceeds 100000 bytes/);
+    await assert.rejects(() => fetchURL(url, { maxBytes: 100_000, allowPrivate: true }),
+      /exceeds 100000 bytes/);
     assert.ok(sent < 400 * chunk.length, 'must not have read the whole body');
   } finally {
     // a socket left open by the aborted read would keep the process alive
