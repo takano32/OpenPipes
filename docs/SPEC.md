@@ -108,7 +108,7 @@ Param descriptor kinds (the complete set the frontend must support):
 Every param has `name`, `label`, `kind`, `default`. For `rules`, `default` is an
 array with one prototype row.
 
-### Module types (all 22, exact params)
+### Module types (all 23, exact params)
 
 **Sources**
 
@@ -191,7 +191,25 @@ usable anywhere via `${name}` template placeholders (see Execution).
     percent-encoded and appended with `?` or `&` depending on whether `base`
     already has a query; a row is skipped when its name or its **value** is
     empty, so a field the item lacks does not produce `&lang=`.
-21. `strip_html` — "Strip HTML". Params: `fields` list default
+21. `loop` — "Loop". Params: `pipe` text default `""` (a **saved pipe id**);
+    `mode` select `["replace","assign"]` default `"replace"`; `to` text default
+    `"items"`; `limit` number min 1 default 20.
+    Runs the named saved pipe once per input item. The item reaches the
+    sub-pipe as its **parameters**: every top-level scalar field becomes a
+    `${name}`, so `${link}` inside the sub-pipe means this item's link (the
+    caller's own params are inherited underneath and lose to the item's).
+    `replace` swaps the item for the sub-pipe's items (an item yielding none
+    disappears); `assign` keeps the item and writes the array to `to`.
+    An empty `pipe` id passes items through untouched.
+    Guards, since this is the one module that multiplies work: nesting stops
+    at 3 levels, a pipe that reaches itself is refused by name, sub-pipes run
+    4 at a time, and `limit` caps how many items are processed — the excess is
+    reported through `errors`, never dropped silently. Errors raised inside a
+    sub-pipe are re-reported against the loop module, capped at 5 per run.
+    The engine never touches the filesystem: `options.loadPipe(id) -> pipe`
+    supplies the sub-pipe, and the module reports it is unavailable when the
+    caller passes none.
+22. `strip_html` — "Strip HTML". Params: `fields` list default
     `["description"]`. For each listed field: drops `<script>`/`<style>`
     including their contents, turns `<br>` and closing `p`/`div`/`li` into
     newlines, removes every remaining tag, decodes entities, and collapses
@@ -205,7 +223,7 @@ appear in the same string and do not interfere.
 
 **Output**
 
-22. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
+23. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
 
 There is no Split module: an output port already fans out to as many inputs as
 you wire it to, which is all Yahoo Pipes' Split did.
@@ -225,8 +243,12 @@ export function catalog()                      // -> descriptor array (above)
 export async function runPipe(pipe, options)   // -> { items, debug, errors }
 ```
 
-`options`: `{ params?: {name: value}, fetcher?: async (url) => ({status, headers, text}), baseUrl?: string, debugLimit?: number (default 20) }`.
-`fetcher` defaults to `fetchURL` from feed.js; tests inject a fake.
+`options`: `{ params?: {name: value}, fetcher?: async (url) => ({status, headers, text}), baseUrl?: string, debugLimit?: number (default 20), loadPipe?: async (id) => pipe, depth?: number, running?: Set<string> }`.
+`fetcher` defaults to `fetchURL` from feed.js; tests inject a fake. `loadPipe`
+is what `loop` calls to fetch a saved pipe — server.js passes its own loader,
+tests pass a canned one, and omitting it disables `loop` with a clear message.
+`depth` and `running` are how a loop tells its sub-run how deep it already is
+and which pipes are on the stack; callers leave them alone.
 
 Execution:
 1. **Template substitution**: deep-walk every module's params; in every string,

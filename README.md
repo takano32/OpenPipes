@@ -34,7 +34,7 @@ node server.js
 
 例: `http://localhost:3000/pipes/demo-tech-filter/run?q=Rust&format=json`
 
-## モジュール一覧(22 種)
+## モジュール一覧(23 種)
 
 | type | 名前 | カテゴリ | 説明 |
 |------|------|----------|------|
@@ -59,11 +59,18 @@ node server.js
 | `date_builder` | Date Builder | Operators | 日付フィールドを iso / rfc822 / date / datetime / epoch に整形 |
 | `url_builder` | URL Builder | Operators | ベース URL にクエリパラメータを付けて組み立てる(値が空の行は出力しない) |
 | `strip_html` | Strip HTML | Operators | 指定フィールドからタグを除去して実体参照を復元 |
+| `loop` | Loop | Operators | 保存済みパイプをアイテムごとに実行(結果で置換、またはフィールドに格納) |
 | `output` | Pipe Output | Output | パイプの最終結果。1 パイプに 1 つ |
 
 String Builder と URL Builder の文字列では `{title}` や `{author.name}` と書くとアイテムのフィールドが差し込まれます(存在しなければ空文字、`{{` と `}}` は波括弧そのもの)。実行前に一度だけ置換されるパイプパラメータ `${name}` とは別物で、同じ文字列に混在させても干渉しません。
 
 Yahoo! Pipes にあった Split は用意していません。出力ポートは元から好きなだけ分岐できるので、同じことができます。
+
+### Loop(サブパイプ)
+
+Loop は、入力アイテム 1 件ごとに保存済みパイプを実行します。アイテムのトップレベルの値がそのままサブパイプのパラメータになるので、サブパイプ側では `${link}` と書けば「そのアイテムの link」を指します。`mode` が `replace` ならアイテムをサブパイプの出力で置き換え、`assign` ならアイテムを残して `to` で指定したフィールドに結果の配列を入れます。
+
+処理量が掛け算で増える唯一のモジュールなので、入れ子は 3 段まで、自分自身を呼ぶパイプは名前で拒否、サブパイプの同時実行は 4 本まで、`limit` を超えた分は黙って捨てずに警告として報告します。
 
 ## パイプ定義 JSON フォーマット
 
