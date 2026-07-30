@@ -138,6 +138,7 @@ function commit(key = null) {
   }
   history.lastKey = key;
   syncHistoryUI();
+  drawMinimap();
 }
 
 function resetHistory() {
@@ -213,6 +214,7 @@ function setZoom(next, anchor) {
   wrap.scrollLeft += (before.x - after.x) * zoom;
   wrap.scrollTop += (before.y - after.y) * zoom;
   dom.zoomLabel.textContent = Math.round(zoom * 100) + '%';
+  drawMinimap();
 }
 
 function stepZoom(direction, anchor) {
@@ -232,6 +234,127 @@ function bindZoom() {
     e.preventDefault();
     stepZoom(e.deltaY < 0 ? 1 : -1, { x: e.clientX, y: e.clientY });
   }, { passive: false });
+}
+
+/* ---------- minimap ---------- */
+
+// Fits every module into the little canvas and marks where the viewport is.
+// Drawn from state plus the cards' measured sizes, so it needs no separate
+// bookkeeping — just a redraw whenever the graph or the scroll changes.
+const MINIMAP_PAD = 120;
+
+function minimapBounds() {
+  if (!state.modules.length) return null;
+  let x1 = Infinity;
+  let y1 = Infinity;
+  let x2 = -Infinity;
+  let y2 = -Infinity;
+  for (const m of state.modules) {
+    const card = cardEls.get(m.id);
+    x1 = Math.min(x1, m.x);
+    y1 = Math.min(y1, m.y);
+    x2 = Math.max(x2, m.x + (card ? card.offsetWidth : 260));
+    y2 = Math.max(y2, m.y + (card ? card.offsetHeight : 120));
+  }
+  // include the viewport so the marker is always somewhere on the map
+  const wrap = dom.canvasWrap;
+  x1 = Math.min(x1, wrap.scrollLeft / zoom);
+  y1 = Math.min(y1, wrap.scrollTop / zoom);
+  x2 = Math.max(x2, (wrap.scrollLeft + wrap.clientWidth) / zoom);
+  y2 = Math.max(y2, (wrap.scrollTop + wrap.clientHeight) / zoom);
+  return { x1: x1 - MINIMAP_PAD, y1: y1 - MINIMAP_PAD, x2: x2 + MINIMAP_PAD, y2: y2 + MINIMAP_PAD };
+}
+
+let minimapView = null; // { bounds, scale, offsetX, offsetY }
+
+function drawMinimap() {
+  const map = dom.minimap;
+  if (!map) return;
+  const bounds = minimapBounds();
+  map.hidden = !bounds;
+  minimapView = null;
+  if (!bounds) return;
+
+  const w = map.width;
+  const h = map.height;
+  const scale = Math.min(w / (bounds.x2 - bounds.x1), h / (bounds.y2 - bounds.y1));
+  const offsetX = (w - (bounds.x2 - bounds.x1) * scale) / 2;
+  const offsetY = (h - (bounds.y2 - bounds.y1) * scale) / 2;
+  minimapView = { bounds, scale, offsetX, offsetY };
+  const px = (x) => offsetX + (x - bounds.x1) * scale;
+  const py = (y) => offsetY + (y - bounds.y1) * scale;
+
+  const g = map.getContext('2d');
+  g.clearRect(0, 0, w, h);
+
+  g.strokeStyle = '#b6c0cd';
+  g.lineWidth = 1;
+  for (const wire of state.wires) {
+    const from = state.modules.find((m) => m.id === wire.from.module);
+    const to = state.modules.find((m) => m.id === wire.to.module);
+    if (!from || !to) continue;
+    const fc = cardEls.get(from.id);
+    const tc = cardEls.get(to.id);
+    g.beginPath();
+    g.moveTo(px(from.x + (fc ? fc.offsetWidth : 260) / 2), py(from.y + (fc ? fc.offsetHeight : 120)));
+    g.lineTo(px(to.x + (tc ? tc.offsetWidth : 260) / 2), py(to.y));
+    g.stroke();
+  }
+
+  for (const m of state.modules) {
+    const card = cardEls.get(m.id);
+    const d = descriptorOf(m);
+    g.fillStyle = CATEGORY_COLORS[d.category] || '#8a94a3';
+    g.globalAlpha = state.selected.has(m.id) ? 1 : 0.75;
+    g.fillRect(px(m.x), py(m.y),
+      Math.max(2, (card ? card.offsetWidth : 260) * scale),
+      Math.max(2, (card ? card.offsetHeight : 120) * scale));
+  }
+  g.globalAlpha = 1;
+
+  const wrap = dom.canvasWrap;
+  g.strokeStyle = '#2f80ed';
+  g.lineWidth = 1.5;
+  g.strokeRect(
+    px(wrap.scrollLeft / zoom), py(wrap.scrollTop / zoom),
+    (wrap.clientWidth / zoom) * scale, (wrap.clientHeight / zoom) * scale,
+  );
+}
+
+const CATEGORY_COLORS = {
+  Sources: '#2f80ed',
+  'User Inputs': '#9b51e0',
+  Operators: '#f2994a',
+  Output: '#27ae60',
+};
+
+function bindMinimap() {
+  const jump = (e) => {
+    if (!minimapView) return;
+    const r = dom.minimap.getBoundingClientRect();
+    const { bounds, scale, offsetX, offsetY } = minimapView;
+    // centre the viewport on the point that was clicked
+    const cx = bounds.x1 + ((e.clientX - r.left) - offsetX) / scale;
+    const cy = bounds.y1 + ((e.clientY - r.top) - offsetY) / scale;
+    dom.canvasWrap.scrollLeft = cx * zoom - dom.canvasWrap.clientWidth / 2;
+    dom.canvasWrap.scrollTop = cy * zoom - dom.canvasWrap.clientHeight / 2;
+  };
+  dom.minimap.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    dom.minimap.setPointerCapture?.(e.pointerId);
+    jump(e);
+    const onMove = (ev) => { if (ev.buttons & 1) jump(ev); };
+    const stop = () => {
+      dom.minimap.removeEventListener('pointermove', onMove);
+      dom.minimap.removeEventListener('pointerup', stop);
+      dom.minimap.removeEventListener('pointercancel', stop);
+    };
+    dom.minimap.addEventListener('pointermove', onMove);
+    dom.minimap.addEventListener('pointerup', stop);
+    dom.minimap.addEventListener('pointercancel', stop);
+  });
+  dom.canvasWrap.addEventListener('scroll', drawMinimap, { passive: true });
+  window.addEventListener('resize', drawMinimap);
 }
 
 function toast(message, kind) {
@@ -282,6 +405,7 @@ async function init() {
   dom.zoomIn = $('#zoom-in');
   dom.zoomOut = $('#zoom-out');
   dom.zoomLabel = $('#zoom-label');
+  dom.minimap = $('#minimap');
 
   try {
     state.config = await api('/api/config');
@@ -306,6 +430,7 @@ async function init() {
   bindCanvas();
   bindKeys();
   bindZoom();
+  bindMinimap();
   bindDebugger();
   renderPipe();
   resetHistory();
@@ -688,7 +813,10 @@ function startCardDrag(e, mod, card, header) {
       }
       updateWiresFor(o.m.id);
     }
-    if (changed) moved = true;
+    if (changed) {
+      moved = true;
+      drawMinimap();
+    }
   };
   const onEnd = () => {
     header.removeEventListener('pointermove', onMove);
@@ -827,6 +955,7 @@ function paintSelection() {
   for (const [id, card] of cardEls) card.classList.toggle('selected', state.selected.has(id));
   for (const [id, g] of wireEls) g.classList.toggle('selected', state.selectedWire === id);
   renderDebugger();
+  drawMinimap();
 }
 
 // `additive` is shift/ctrl-click: toggle this module in or out and leave the
@@ -1030,6 +1159,7 @@ function renderPipe() {
   renderRunDecorations();
   renderDebugger();
   updateHint();
+  drawMinimap();
 }
 
 /* ---------- run decorations (badges + error rings) ---------- */

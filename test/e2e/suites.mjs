@@ -446,6 +446,47 @@ export const suites = [
   check('and paste brings it back', (await page.counts()).modules === 4);
 }],
 
+/* ------------------------------------------------------------------ minimap */
+['minimap', async ({ page, origin, check }) => {
+  const hidden = () => page.eval(`document.querySelector('#minimap').hidden`);
+  // any non-transparent pixel means something was drawn
+  const painted = () => page.eval(`(() => {
+    const c = document.querySelector('#minimap');
+    const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++;
+    return n; })()`);
+
+  await page.goto(`${origin}/`);
+  check('an empty pipe has no minimap to show', await hidden());
+
+  await page.dropModule('item_builder', 400, 150);
+  check('adding a module reveals it', !(await hidden()));
+  const one = await painted();
+  check('and something is drawn on it', one > 0, one);
+
+  await page.dropModule('output', 420, 430);
+  const p = await page.portPair();
+  await page.drag(p.ox, p.oy, p.ix, p.iy);
+  const two = await painted();
+  check('a second module and a wire add to it', two > one, { one, two });
+
+  // clicking the map scrolls the canvas to that point
+  await page.goto(`${origin}/?pipe=demo-loop`, 1700);
+  check('the minimap is shown for a loaded pipe', !(await hidden()));
+  const before = await page.eval(`document.querySelector('#canvas-wrap').scrollTop`);
+  const target = await page.eval(`(() => { const r = document.querySelector('#minimap').getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.bottom - 8 }; })()`);
+  await page.drag(target.x, target.y, target.x, target.y, 1);
+  const after = await page.eval(`document.querySelector('#canvas-wrap').scrollTop`);
+  check('clicking near the bottom scrolls down', after > before, { before, after });
+
+  await page.eval(`document.querySelector('#btn-run').click()`);
+  await new Promise((r) => setTimeout(r, 1500));
+  check('the pipe still runs with the minimap up',
+    (await page.eval(`document.querySelector('#debugger-body').textContent`)).includes('OpenPipes Demo'));
+}],
+
 /* --------------------------------------------------------- saved pipe list */
 ['saved pipes', async ({ page, origin, check }) => {
   await page.goto(`${origin}/`);

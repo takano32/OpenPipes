@@ -273,6 +273,24 @@ button, input, select { font-family: inherit; color: inherit; }
   height: 3000px;
 }
 
+#minimap {
+  position: absolute;
+  right: 16px;
+  bottom: 48px;
+  width: 200px;
+  height: 150px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 2px 8px rgba(30, 42, 60, 0.14);
+  cursor: pointer;
+  touch-action: none;
+  z-index: 5;
+}
+
+/* nothing to overview yet */
+#minimap[hidden] { display: none; }
+
 #zoom-bar {
   position: absolute;
   right: 16px;

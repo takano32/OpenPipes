@@ -55,8 +55,22 @@ const dataDir = await mkdtemp(path.join(tmpdir(), 'openpipes-e2e-'));
 // the suites expect the shipped demo pipes to be loadable
 await cp(path.join(ROOT, 'data', 'pipes'), dataDir, { recursive: true });
 
-const appPort = 20000 + Math.floor(process.pid % 10000);
-const cdpPort = appPort + 1;
+// Ports derived from the pid collide when two runs overlap — the second one
+// then talks to the first one's dying browser. Ask the OS for free ones.
+async function freePort() {
+  const net = await import('node:net');
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+const appPort = await freePort();
+const cdpPort = await freePort();
 const origin = `http://127.0.0.1:${appPort}`;
 
 const server = spawnQuiet(process.execPath, [path.join(ROOT, 'server.js')],

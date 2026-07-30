@@ -459,6 +459,13 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
   **New**: confirm() when there are unsaved changes.
 - Canvas panning via scrollbars (the canvas inner area is 4000×3000). Module
   drag updates wires live.
+- **Minimap**, bottom right above the zoom control: a 200×150 `<canvas>`
+  showing every module as a category-coloured rectangle, the wires between
+  them, and a blue outline for the current viewport. Hidden when the pipe is
+  empty. Clicking or dragging on it centres the canvas on that point. Drawn
+  from `state` plus the cards' measured sizes, so it keeps no bookkeeping of
+  its own; it is redrawn on commit, selection, zoom, canvas scroll, window
+  resize and during a card drag.
 - **Zoom** 40%–200% in fixed steps, via the ─ / % / + control at the bottom
   right of the canvas, `Ctrl`/`Cmd` + wheel (plain wheel still scrolls), and
   `Ctrl`/`Cmd` + `+` / `-` / `0`. Clicking the percentage returns to 100%.
