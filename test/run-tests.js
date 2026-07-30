@@ -234,14 +234,14 @@ test('buildRSS: RFC 822 pubDate, guid, atom:link self', () => {
 
 // ---------------------------------------------------------------- catalog
 
-test('catalog: all 24 module types with expected port layout', () => {
+test('catalog: all 25 module types with expected port layout', () => {
   const cat = catalog();
   assert.deepEqual(
     cat.map((d) => d.type).sort(),
     ['count', 'date_builder', 'fetch_feed', 'fetch_json', 'fetch_page', 'filter',
       'item_builder', 'loop', 'number_input', 'output', 'regex', 'rename', 'reverse',
-      'sort', 'string_builder', 'strip_html', 'sub_element', 'tail', 'text_input',
-      'truncate', 'union', 'unique', 'url_builder', 'url_input'],
+      'sort', 'string_builder', 'strip_html', 'sub_element', 'tail', 'term_extractor',
+      'text_input', 'truncate', 'union', 'unique', 'url_builder', 'url_input'],
   );
   const filter = cat.find((d) => d.type === 'filter');
   assert.deepEqual(filter.inputs.map((p) => p.name), ['in']);
@@ -664,6 +664,48 @@ test('buildJSONFeed: only emits what the item has, and always an id', () => {
 test('buildJSONFeed: an unparseable date is left out rather than emitted as junk', () => {
   const { items } = JSON.parse(buildJSONFeed({ title: 't', items: [{ title: 'x', pubDate: 'soon' }] }));
   assert.equal(items[0].date_published, undefined);
+});
+
+// -------------------------------------------------------------- term extractor
+
+async function termsOf(text, params = {}) {
+  const { items } = await runOps([{ description: text }],
+    [mod('t', 'term_extractor', { field: 'description', to: 'terms', count: 5, ...params })]);
+  return items[0].terms;
+}
+
+test('term_extractor: frequent words win, stopwords and short words do not', async () => {
+  const terms = await termsOf(
+    '<p>The Rust compiler team announced that Rust 2.0 will make the compiler '
+    + 'dramatically faster. Compiler performance is the top request.</p>');
+  assert.equal(terms[0], 'compiler', 'said three times');
+  assert.equal(terms[1], 'rust', 'said twice');
+  assert.ok(!terms.includes('the') && !terms.includes('that'), 'stopwords are dropped');
+  assert.ok(!terms.some((t) => t.length < 3), 'very short words are dropped');
+});
+
+test('term_extractor: Japanese splits on kana, keeping the compounds', async () => {
+  const terms = await termsOf(
+    '人工知能の研究が進み、人工知能を使った開発支援ツールが増えている。開発の現場では人工知能の活用が広がる。');
+  assert.equal(terms[0], '人工知能');
+  assert.ok(terms.includes('開発支援ツール'), terms.join());
+  assert.ok(!terms.some((t) => /^[\u3040-\u309f]+$/.test(t)), 'no kana-only fragments');
+});
+
+test('term_extractor: honours the count and strips markup first', async () => {
+  const terms = await termsOf('<b>alpha</b> alpha beta beta gamma gamma delta', { count: 2 });
+  assert.equal(terms.length, 2);
+  assert.ok(!terms.some((t) => t.includes('<') || t === 'b'), terms.join());
+});
+
+test('term_extractor: a missing field leaves the item untouched', async () => {
+  const { items } = await runOps([{ title: 'no description here' }],
+    [mod('t', 'term_extractor', { field: 'description', to: 'terms', count: 5 })]);
+  assert.deepEqual(items, [{ title: 'no description here' }]);
+});
+
+test('term_extractor: empty text yields an empty list, not an error', async () => {
+  assert.deepEqual(await termsOf(''), []);
 });
 
 // --------------------------------------------------------------- html / scraping

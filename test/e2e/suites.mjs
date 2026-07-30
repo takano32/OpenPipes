@@ -8,7 +8,7 @@ export const suites = [
   await page.goto(`${origin}/`);
   check('palette lists every catalogued module', await page.eval(
     `fetch('/api/modules').then(r => r.json())
-       .then(c => c.length === document.querySelectorAll('.pal-item').length && c.length)`) === 24);
+       .then(c => c.length === document.querySelectorAll('.pal-item').length && c.length)`) === 25);
   check('palette groups the 4 categories',
     await page.eval(`document.querySelectorAll('.pal-group').length`) === 4);
   check('the empty-canvas hint is visible',
@@ -444,6 +444,82 @@ export const suites = [
   check('cut empties the canvas', (await page.counts()).modules === 0);
   await page.key('v', { ctrl: true });
   check('and paste brings it back', (await page.counts()).modules === 4);
+}],
+
+/* ------------------------------------------------------------- auto layout */
+['auto layout', async ({ page, origin, check }) => {
+  const boxes = () => page.eval(`(() => {
+    const out = {};
+    for (const c of document.querySelectorAll('.module-card')) {
+      out[c.querySelector('.card-title').textContent] =
+        { x: parseFloat(c.style.left), y: parseFloat(c.style.top) };
+    }
+    return out; })()`);
+
+  await page.goto(`${origin}/?pipe=demo-loop`, 1700);
+  // scatter the tidy demo pipe, then ask for it back
+  await page.eval(`(() => {
+    document.querySelectorAll('.module-card').forEach((c, i) => {
+      c.style.left = (900 - i * 130) + 'px';
+      c.style.top = (60 + (i % 2) * 500) + 'px';
+    });
+    return true; })()`);
+
+  await page.eval(`document.querySelector('#btn-layout').click()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const laid = await boxes();
+  const order = ['Fetch Feed', 'Sort', 'Truncate', 'Loop', 'Strip HTML', 'Pipe Output'];
+  check('every module in the chain got a row', order.every((n) => laid[n]), Object.keys(laid));
+  check('rows follow the direction of the wires',
+    order.every((n, i) => i === 0 || laid[n].y > laid[order[i - 1]].y),
+    order.map((n) => laid[n] && laid[n].y));
+  check('a single chain lines up in one column',
+    new Set(order.map((n) => laid[n].x)).size === 1, order.map((n) => laid[n].x));
+
+  await page.key('z', { ctrl: true });
+  const undone = await boxes();
+  check('the whole arrangement is one undo step',
+    undone['Fetch Feed'].x !== laid['Fetch Feed'].x, { undone, laid });
+
+  // user inputs sit beside the flow, not in it
+  await page.goto(`${origin}/?pipe=demo-tech-filter`, 1700);
+  await page.eval(`document.querySelector('#btn-layout').click()`);
+  await new Promise((r) => setTimeout(r, 400));
+  const withInput = await boxes();
+  check('a user input is placed left of the chain',
+    withInput['Text Input'].x < withInput['Fetch Feed'].x, withInput);
+
+  await page.goto(`${origin}/`);
+  await page.eval(`document.querySelector('#btn-layout').click()`);
+  check('arranging an empty canvas does nothing at all',
+    (await page.counts()).modules === 0);
+}],
+
+/* ----------------------------------------------------------- duplicate pipe */
+['duplicate pipe', async ({ page, origin, check }) => {
+  await page.goto(`${origin}/`);
+  const listNames = () => page.eval(
+    `fetch('/api/pipes').then(r => r.json()).then(l => l.map(p => p.name))`);
+
+  await page.eval(`window.confirm = () => true`);
+  await page.eval(`document.querySelector('#btn-load').click()`);
+  await new Promise((r) => setTimeout(r, 500));
+  await page.eval(`(() => { const rows = [...document.querySelectorAll('#load-menu .menu-item')];
+    const row = rows.find((r) => r.querySelector('.menu-name').textContent === 'デモ: フィードのマージ');
+    row.querySelector('.menu-act').click(); return true; })()`);
+  await new Promise((r) => setTimeout(r, 700));
+
+  const names = await listNames();
+  check('the copy is saved under its own name',
+    names.includes('デモ: フィードのマージ のコピー'), names);
+  check('the original is still there', names.includes('デモ: フィードのマージ'));
+
+  const copy = await page.eval(`fetch('/api/pipes').then(r => r.json())
+    .then(l => l.find(p => p.name.endsWith('のコピー')))
+    .then(p => fetch('/api/pipes/' + p.id).then(r => r.json()))`);
+  check('the copy has the same graph', copy.modules.length === 6 && copy.wires.length === 5,
+    { modules: copy.modules.length, wires: copy.wires.length });
+  check('and a different id', copy.id !== 'demo-merged', copy.id);
 }],
 
 /* ------------------------------------------------------------------ minimap */

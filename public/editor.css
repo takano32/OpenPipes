@@ -166,7 +166,7 @@ button, input, select { font-family: inherit; color: inherit; }
 
 .menu-date { flex: none; color: var(--muted); font-size: 11px; }
 
-.menu-del {
+.menu-act {
   flex: none;
   width: 20px;
   height: 20px;
@@ -181,8 +181,10 @@ button, input, select { font-family: inherit; color: inherit; }
   opacity: 0;
 }
 
-.menu-item:hover .menu-del,
-.menu-del:focus-visible { opacity: 1; }
+.menu-item:hover .menu-act,
+.menu-act:focus-visible { opacity: 1; }
+
+.menu-act:hover { background: #eef4fd; color: var(--accent); }
 
 .menu-del:hover { background: #fdecec; color: var(--danger); }
 

@@ -109,7 +109,7 @@ Param descriptor kinds (the complete set the frontend must support):
 Every param has `name`, `label`, `kind`, `default`. For `rules`, `default` is an
 array with one prototype row.
 
-### Module types (all 24, exact params)
+### Module types (all 25, exact params)
 
 **Sources**
 
@@ -222,7 +222,15 @@ usable anywhere via `${name}` template placeholders (see Execution).
     The engine never touches the filesystem: `options.loadPipe(id) -> pipe`
     supplies the sub-pipe, and the module reports it is unavailable when the
     caller passes none.
-23. `strip_html` — "Strip HTML". Params: `fields` list default
+23. `term_extractor` — "Term Extractor". Params: `field` text default
+    `"description"`; `to` text default `"terms"`; `count` number min 1
+    default 5. Writes the most distinctive words of `field` to `to` as an
+    array. Markup is stripped first. Latin text is split on word boundaries
+    with words under three letters and a short stopword list dropped; a run of
+    Japanese is cut on hiragana instead, since that is where the grammar sits,
+    leaving the kanji and katakana compounds. Ranked by frequency, then by
+    length. An item without the field is passed through untouched.
+24. `strip_html` — "Strip HTML". Params: `fields` list default
     `["description"]`. For each listed field: drops `<script>`/`<style>`
     including their contents, turns `<br>` and closing `p`/`div`/`li` into
     newlines, removes every remaining tag, decodes entities, and collapses
@@ -236,7 +244,7 @@ appear in the same string and do not interfere.
 
 **Output**
 
-24. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
+25. `output` — "Pipe Output". In: `in`. No outputs, no params. The pipe's result.
 
 There is no Split module: an output port already fans out to as many inputs as
 you wire it to, which is all Yahoo Pipes' Split did.
@@ -453,12 +461,23 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
   the debugger refreshes for the selected (or output) module.
 - **Save**: POST `/api/pipes` (keeps id after first save; server assigns one
   when absent). **Load ▾**: dropdown fetched from GET `/api/pipes`; picking
-  one loads it. Loading sanitizes the file first (drop non-object or
+  one loads it. Each row also carries **⧉ duplicate** and **✕
+  delete** (both hidden in read-only mode); duplicate saves a copy named
+  "<name> のコピー" through the API without disturbing the canvas. Loading sanitizes the file first (drop non-object or
   duplicate-id modules, wires whose endpoints don't exist, malformed
   list/rules rows) so a hand-edited file can't leave the canvas broken. Also offers "Open RSS" link to `/pipes/<id>/run` once saved.
   **New**: confirm() when there are unsaved changes.
 - Canvas panning via scrollbars (the canvas inner area is 4000×3000). Module
   drag updates wires live.
+- **Auto layout** (⇵ in the top bar, `Ctrl`/`Cmd`+`Shift`+`L`): places every
+  module by its longest path from a source, so a wire only ever points down a
+  row and never back up. Within a row the existing left-to-right order is
+  kept, so the arrangement stays recognisable. Rows are spaced by the tallest
+  card in them, measured rather than assumed, because a card's height depends
+  on how many rule rows it has. User-input modules have no ports and are not
+  part of the flow, so they get their own column to the left. A cycle the
+  editor is holding mid-edit resolves to row 0 rather than looping. One undo
+  step, however many modules moved.
 - **Minimap**, bottom right above the zoom control: a 200×150 `<canvas>`
   showing every module as a category-coloured rectangle, the wires between
   them, and a blue outline for the current viewport. Hidden when the pipe is

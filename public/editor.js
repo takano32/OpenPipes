@@ -236,6 +236,84 @@ function bindZoom() {
   }, { passive: false });
 }
 
+/* ---------- auto layout ---------- */
+
+const LAYOUT = { x0: 60, y0: 40, gapX: 40, gapY: 60, inputGap: 60 };
+
+// Longest path from any source: a module sits one row below whatever feeds it,
+// so wires only ever point downwards and never skip back up a row.
+function layerOf(modules, wires) {
+  const incoming = new Map(modules.map((m) => [m.id, []]));
+  for (const w of wires) {
+    if (incoming.has(w.to.module) && incoming.has(w.from.module)) {
+      incoming.get(w.to.module).push(w.from.module);
+    }
+  }
+  const layer = new Map();
+  const visiting = new Set();
+  const depth = (id) => {
+    if (layer.has(id)) return layer.get(id);
+    if (visiting.has(id)) return 0; // a cycle the editor is holding mid-edit
+    visiting.add(id);
+    const ups = incoming.get(id) || [];
+    const d = ups.length ? Math.max(...ups.map(depth)) + 1 : 0;
+    visiting.delete(id);
+    layer.set(id, d);
+    return d;
+  };
+  for (const m of modules) depth(m.id);
+  return layer;
+}
+
+function autoLayout() {
+  if (!state.modules.length) return;
+  // user inputs are not part of the flow; they get their own column on the left
+  const flow = state.modules.filter((m) => !isUserInput(m));
+  const inputs = state.modules.filter((m) => isUserInput(m));
+  const size = (m) => {
+    const card = cardEls.get(m.id);
+    return { w: card ? card.offsetWidth : 260, h: card ? card.offsetHeight : 120 };
+  };
+
+  const layer = layerOf(flow, state.wires);
+  const rows = new Map();
+  for (const m of flow) {
+    const d = layer.get(m.id) || 0;
+    if (!rows.has(d)) rows.set(d, []);
+    rows.get(d).push(m);
+  }
+
+  const inputWidth = inputs.length ? Math.max(...inputs.map((m) => size(m).w)) + LAYOUT.inputGap : 0;
+  const left = LAYOUT.x0 + inputWidth;
+  let y = LAYOUT.y0;
+  for (const d of [...rows.keys()].sort((a, b) => a - b)) {
+    // keep the left-to-right order the user already had within the row
+    const row = rows.get(d).sort((a, b) => a.x - b.x || a.id.localeCompare(b.id));
+    let x = left;
+    let tallest = 0;
+    for (const m of row) {
+      const { w, h } = size(m);
+      m.x = Math.round(x);
+      m.y = Math.round(y);
+      x += w + LAYOUT.gapX;
+      tallest = Math.max(tallest, h);
+    }
+    y += tallest + LAYOUT.gapY;
+  }
+
+  let iy = LAYOUT.y0;
+  for (const m of inputs) {
+    m.x = LAYOUT.x0;
+    m.y = Math.round(iy);
+    iy += size(m).h + LAYOUT.gapY;
+  }
+
+  commit(); // one step, however many modules moved
+  renderPipe();
+  dom.canvasWrap.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+  toast('整列しました');
+}
+
 /* ---------- minimap ---------- */
 
 // Fits every module into the little canvas and marks where the viewport is.
@@ -406,6 +484,7 @@ async function init() {
   dom.zoomOut = $('#zoom-out');
   dom.zoomLabel = $('#zoom-label');
   dom.minimap = $('#minimap');
+  dom.layout = $('#btn-layout');
 
   try {
     state.config = await api('/api/config');
@@ -1118,6 +1197,12 @@ function bindKeys() {
       if (k === 'x') { e.preventDefault(); copySelection(); deleteSelection(); return; }
       if (k === 'v') { e.preventDefault(); pasteClipboard(); return; }
     }
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'L' || e.key === 'l')) {
+      if (isFormField(document.activeElement)) return;
+      e.preventDefault();
+      autoLayout();
+      return;
+    }
     if (e.key === 'Escape') {
       clearSelection();
       return;
@@ -1322,6 +1407,7 @@ function bindTopbar() {
   });
   dom.undo.addEventListener('click', undo);
   dom.redo.addEventListener('click', redo);
+  dom.layout.addEventListener('click', autoLayout);
   $('#btn-run').addEventListener('click', runPipe);
   $('#btn-save').addEventListener('click', savePipe);
   $('#btn-new').addEventListener('click', newPipe);
@@ -1414,10 +1500,19 @@ async function toggleLoadMenu() {
     }
     for (const p of list) {
       const label = p.name || p.id;
+      let dup = null;
       let del = null;
       if (!state.config.readOnly) {
+        dup = el('button', {
+          class: 'menu-act', type: 'button', text: '⧉',
+          title: `「${label}」を複製`, 'aria-label': `${label} を複製`,
+        });
+        dup.addEventListener('click', (e) => {
+          e.stopPropagation();
+          duplicatePipe(p.id, label);
+        });
         del = el('button', {
-          class: 'menu-del', type: 'button', text: '×',
+          class: 'menu-act menu-del', type: 'button', text: '×',
           title: `「${label}」を削除`, 'aria-label': `${label} を削除`,
         });
         del.addEventListener('click', (e) => {
@@ -1428,7 +1523,7 @@ async function toggleLoadMenu() {
       const row = el('div', { class: 'menu-item' },
         el('span', { class: 'menu-name', text: label }),
         el('span', { class: 'menu-date', text: p.savedAt ? new Date(p.savedAt).toLocaleString() : '' }),
-        del);
+        dup, del);
       row.addEventListener('click', () => {
         dom.loadMenu.hidden = true;
         loadPipe(p.id);
@@ -1438,6 +1533,28 @@ async function toggleLoadMenu() {
   } catch (err) {
     dom.loadMenu.textContent = '';
     dom.loadMenu.append(el('div', { class: 'menu-note', text: '取得エラー: ' + err.message }));
+  }
+}
+
+// Saves a copy under a new id. Done through the API rather than by loading
+// into the editor, so it does not disturb whatever is on the canvas.
+async function duplicatePipe(id, label) {
+  try {
+    const pipe = await api('/api/pipes/' + encodeURIComponent(id));
+    const copy = await postJSON('/api/pipes', {
+      name: `${pipe.name || label} のコピー`,
+      modules: pipe.modules,
+      wires: pipe.wires,
+    });
+    toast(`「${pipe.name || label}」を複製しました`);
+    if (!dom.loadMenu.hidden) {
+      dom.loadMenu.hidden = true;
+      toggleLoadMenu(); // reopen on the refreshed list
+    }
+    return copy.id;
+  } catch (err) {
+    toast('複製エラー: ' + err.message, 'error');
+    return null;
   }
 }
 
