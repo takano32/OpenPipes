@@ -343,7 +343,23 @@ export function buildRSS({ title, link, description, items }) // -> RSS 2.0 XML 
 | GET    | `/api/pipes/:id`      | full saved file JSON, 404 `{error}` if missing |
 | DELETE | `/api/pipes/:id`      | `{ ok: true }` |
 | GET    | `/api/config`         | `{ readOnly, authRequired }` — what the editor needs to know about this instance. Always public |
-| GET    | `/pipes/:id/run`      | executes saved pipe. `?format=json` → `{ items }`; default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
+| GET    | `/pipes/:id/run`      | executes saved pipe (cached, ETag + 304). `?format=json` → `{ items }`; default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
+
+### Feed caching
+
+`/pipes/:id/run` is polled on a timer by every subscriber, and each poll
+re-fetches every upstream the pipe names, so its rendered output is cached in
+memory for `OPENPIPES_CACHE_TTL` seconds (default 300; `0` disables the store
+but keeps the ETag). The key is the pipe id, its `savedAt`, the `Host` header
+and the raw query string — so saving the pipe invalidates it, and two hosts or
+two parameter sets never share an entry. At most 100 entries are kept, oldest
+evicted first. A run that produced errors is never stored: the upstream may
+just be having a moment.
+
+Every response carries an `ETag` and answers `If-None-Match` with 304, which
+is what actually saves an RSS client bandwidth. `Cache-Control: no-cache` on
+the request recomputes. `X-OpenPipes-Cache: hit|miss` says which happened.
+`/api/run` is never cached — the editor's Run must always show current data.
 
 ### Access control
 

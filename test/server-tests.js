@@ -158,6 +158,109 @@ test('read-only and a password combine', () =>
     assert.equal((await fetch(`${origin}/pipes/demo-merged/run`)).status, 200);
   }));
 
+// ------------------------------------------------------------------- cache
+
+const feed = (origin, q = '') => fetch(`${origin}/pipes/demo-tech-filter/run${q}`);
+
+test('cache: a published feed is computed once and then served from memory', () =>
+  withServer({}, async ({ origin }) => {
+    const first = await feed(origin);
+    assert.equal(first.headers.get('x-openpipes-cache'), 'miss');
+    assert.equal(first.headers.get('cache-control'), 'public, max-age=300');
+    const etag = first.headers.get('etag');
+    assert.ok(etag, 'an ETag is required for conditional requests');
+
+    const second = await feed(origin);
+    assert.equal(second.headers.get('x-openpipes-cache'), 'hit');
+    assert.equal(second.headers.get('etag'), etag);
+    assert.equal(await second.text(), await first.text());
+  }));
+
+test('cache: If-None-Match gets a 304 with no body', () =>
+  withServer({}, async ({ origin }) => {
+    const etag = (await feed(origin)).headers.get('etag');
+    const res = await feed(origin);
+    await res.text();
+    const conditional = await fetch(`${origin}/pipes/demo-tech-filter/run`, {
+      headers: { 'if-none-match': etag },
+    });
+    assert.equal(conditional.status, 304);
+    assert.equal(await conditional.text(), '');
+  }));
+
+test('cache: different query parameters and formats are separate entries', () =>
+  withServer({}, async ({ origin }) => {
+    await feed(origin, '?q=AI');
+    assert.equal((await feed(origin, '?q=AI')).headers.get('x-openpipes-cache'), 'hit');
+    assert.equal((await feed(origin, '?q=Rust')).headers.get('x-openpipes-cache'), 'miss');
+    assert.equal((await feed(origin, '?q=Rust&format=json')).headers.get('x-openpipes-cache'), 'miss');
+    const json = await feed(origin, '?q=Rust&format=json');
+    assert.equal(json.headers.get('content-type'), 'application/json; charset=utf-8');
+    assert.equal((await json.json()).items.length, 1);
+  }));
+
+test('cache: Cache-Control: no-cache recomputes', () =>
+  withServer({}, async ({ origin }) => {
+    await feed(origin);
+    const res = await fetch(`${origin}/pipes/demo-tech-filter/run`, {
+      headers: { 'cache-control': 'no-cache' },
+    });
+    assert.equal(res.headers.get('x-openpipes-cache'), 'miss');
+  }));
+
+test('cache: saving the pipe invalidates what was cached for it', () =>
+  withServer({}, async ({ origin }) => {
+    const before = await (await feed(origin)).text();
+    assert.equal((await feed(origin)).headers.get('x-openpipes-cache'), 'hit');
+
+    const pipe = await (await fetch(`${origin}/api/pipes/demo-tech-filter`)).json();
+    pipe.name = 'renamed by the cache test';
+    const save = await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: asJSON, body: JSON.stringify(pipe),
+    });
+    assert.equal(save.status, 200);
+
+    const after = await feed(origin);
+    assert.equal(after.headers.get('x-openpipes-cache'), 'miss');
+    const body = await after.text();
+    assert.notEqual(body, before);
+    assert.match(body, /renamed by the cache test/);
+  }));
+
+test('cache: OPENPIPES_CACHE_TTL=0 turns it off', () =>
+  withServer({ OPENPIPES_CACHE_TTL: '0' }, async ({ origin }) => {
+    await feed(origin);
+    const res = await feed(origin);
+    assert.equal(res.headers.get('x-openpipes-cache'), 'miss');
+    assert.equal(res.headers.get('cache-control'), 'no-cache');
+    // conditional requests still work, they just re-run the pipe
+    const etag = res.headers.get('etag');
+    await res.text();
+    const conditional = await fetch(`${origin}/pipes/demo-tech-filter/run`, {
+      headers: { 'if-none-match': etag },
+    });
+    assert.equal(conditional.status, 304);
+  }));
+
+test('cache: a failing run is not cached', () =>
+  withServer({}, async ({ origin }) => {
+    const broken = {
+      id: 'broken-cache-test',
+      name: 'broken',
+      modules: [
+        { id: 'm1', type: 'fetch_feed', params: { urls: ['http://127.0.0.1:9/nope.xml'] }, x: 0, y: 0 },
+        { id: 'm2', type: 'output', params: {}, x: 0, y: 0 },
+      ],
+      wires: [{ id: 'w1', from: { module: 'm1', port: 'out' }, to: { module: 'm2', port: 'in' } }],
+    };
+    await fetch(`${origin}/api/pipes`, { method: 'POST', headers: asJSON, body: JSON.stringify(broken) });
+    for (let i = 0; i < 2; i++) {
+      const res = await fetch(`${origin}/pipes/broken-cache-test/run`);
+      assert.equal(res.status, 502);
+      assert.equal(res.headers.get('x-openpipes-cache'), null);
+    }
+  }));
+
 // ------------------------------------------------------------- address filter
 
 test('a pipe cannot reach loopback through the run endpoint', () =>

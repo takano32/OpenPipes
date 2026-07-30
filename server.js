@@ -26,8 +26,39 @@ const AUTH_USER = process.env.OPENPIPES_USER || 'admin';
 const AUTH_PASSWORD = process.env.OPENPIPES_PASSWORD || '';
 // Refuses to modify stored pipes at all, whether or not a password is set.
 const READ_ONLY = process.env.OPENPIPES_READONLY === '1';
+// A published feed is polled on a timer by every subscriber, and each poll
+// re-fetches every upstream the pipe names. Seconds; 0 disables.
+const CACHE_TTL_SECONDS = (() => {
+  const raw = Number(process.env.OPENPIPES_CACHE_TTL);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 300;
+})();
+const CACHE_MAX_ENTRIES = 100;
 const MAX_BODY_BYTES = 1024 * 1024;
 const PIPE_ID_RE = /^[a-z0-9-]{1,64}$/;
+
+// key -> { expires, etag, contentType, body }, in insertion order so the
+// oldest can be dropped once it is full.
+const feedCache = new Map();
+
+function cacheGet(key) {
+  const hit = feedCache.get(key);
+  if (!hit) return null;
+  if (hit.expires <= Date.now()) {
+    feedCache.delete(key);
+    return null;
+  }
+  feedCache.delete(key); // reinsert: least recently used ends up first
+  feedCache.set(key, hit);
+  return hit;
+}
+
+function cacheSet(key, entry) {
+  if (!CACHE_TTL_SECONDS) return;
+  feedCache.set(key, entry);
+  while (feedCache.size > CACHE_MAX_ENTRIES) {
+    feedCache.delete(feedCache.keys().next().value);
+  }
+}
 
 const CONTENT_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -256,6 +287,25 @@ async function handleDeletePipe(req, res, match) {
   sendJSON(res, 200, { ok: true });
 }
 
+// Answers with a rendered feed, as a 304 when the client already has it.
+function sendFeed(req, res, entry, cacheState) {
+  const headers = {
+    'Content-Type': entry.contentType,
+    ETag: entry.etag,
+    'Cache-Control': CACHE_TTL_SECONDS
+      ? `public, max-age=${CACHE_TTL_SECONDS}`
+      : 'no-cache',
+    'X-OpenPipes-Cache': cacheState,
+  };
+  if (req.headers['if-none-match'] === entry.etag) {
+    res.writeHead(304, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(200, headers);
+  res.end(entry.body);
+}
+
 async function handleRunSaved(req, res, match, url) {
   const pipe = await loadPipe(match[1]);
   const outputs = (pipe.modules || []).filter((m) => m && m.type === 'output');
@@ -263,30 +313,47 @@ async function handleRunSaved(req, res, match, url) {
     throw httpError(400, 'Pipe must have exactly one output module');
   }
 
+  // savedAt is in the key, so saving the pipe invalidates its cached output;
+  // host and the raw query are in it because both change the rendered body.
+  const key = JSON.stringify([match[1], pipe.savedAt, req.headers.host || '', req.url]);
+  const fresh = /(^|,)\s*no-cache(\s*,|$)/.test(req.headers['cache-control'] || '');
+  if (!fresh) {
+    const hit = cacheGet(key);
+    if (hit) {
+      sendFeed(req, res, hit, 'hit');
+      return;
+    }
+  }
+
   const params = {};
-  for (const [key, value] of url.searchParams) {
-    if (key !== 'format') params[key] = value;
+  for (const [key2, value] of url.searchParams) {
+    if (key2 !== 'format') params[key2] = value;
   }
 
   const result = await runPipe(pipe,
     { params, baseUrl: baseUrlOf(req), allowPrivate: ALLOW_PRIVATE, loadPipe });
   if (Array.isArray(result.errors) && result.errors.length > 0) {
+    // a failed run is never cached: the upstream may just be having a moment
     throw httpError(502, result.errors.map((e) => `${e.module}: ${e.message}`).join('; '));
   }
 
-  if (url.searchParams.get('format') === 'json') {
-    sendJSON(res, 200, { items: result.items });
-    return;
-  }
-
-  const rss = buildRSS({
-    title: pipe.name,
-    link: baseUrlOf(req) + req.url,
-    description: 'OpenPipes: ' + pipe.name,
-    items: result.items,
-  });
-  res.writeHead(200, { 'Content-Type': 'application/rss+xml; charset=utf-8' });
-  res.end(rss);
+  const json = url.searchParams.get('format') === 'json';
+  const body = json
+    ? JSON.stringify({ items: result.items })
+    : buildRSS({
+      title: pipe.name,
+      link: baseUrlOf(req) + req.url,
+      description: 'OpenPipes: ' + pipe.name,
+      items: result.items,
+    });
+  const entry = {
+    expires: Date.now() + CACHE_TTL_SECONDS * 1000,
+    etag: '"' + crypto.createHash('sha256').update(body).digest('base64url').slice(0, 27) + '"',
+    contentType: json ? 'application/json; charset=utf-8' : 'application/rss+xml; charset=utf-8',
+    body,
+  };
+  cacheSet(key, entry);
+  sendFeed(req, res, entry, 'miss');
 }
 
 async function handleDemoFile(req, res, match) {
