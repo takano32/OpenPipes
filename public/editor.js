@@ -17,7 +17,8 @@ const state = {
   counter: 1,          // seeds m<N>/w<N> ids; re-seeded past loaded ids
   catalog: [],
   byType: new Map(),
-  selection: null,     // { kind: 'module' | 'wire', id }
+  selected: new Set(), // ids of the selected modules
+  selectedWire: null,  // id of the selected wire, if any
   lastDebug: null,     // debug object from the most recent run
   runParams: {},       // user-input values, kept across runs
   dbgJson: false,
@@ -49,6 +50,10 @@ const ZOOM_STEPS = [0.4, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2];
 const CANVAS_W = 4000;
 const CANVAS_H = 3000;
 let zoom = 1;
+
+// Copy/paste stays inside the page: reading the system clipboard needs a
+// permission prompt, and a graph fragment is not useful anywhere else.
+let clipboard = null;
 
 const dom = {};
 const cardEls = new Map();  // module id -> card element
@@ -147,10 +152,11 @@ function restore(snap) {
   state.name = snap.name;
   state.modules = structuredClone(snap.modules);
   state.wires = structuredClone(snap.wires);
-  // the selected module/wire may not exist in the restored graph
-  if (state.selection) {
-    const list = state.selection.kind === 'module' ? state.modules : state.wires;
-    if (!list.some((o) => o.id === state.selection.id)) state.selection = null;
+  // whatever was selected may not exist in the restored graph
+  const ids = new Set(state.modules.map((m) => m.id));
+  for (const id of [...state.selected]) if (!ids.has(id)) state.selected.delete(id);
+  if (state.selectedWire && !state.wires.some((w) => w.id === state.selectedWire)) {
+    state.selectedWire = null;
   }
   renderPipe();
 }
@@ -350,9 +356,11 @@ function bindCanvas() {
     const at = canvasPoint(e.clientX, e.clientY);
     addModule(type, Math.round(at.x) - 130, Math.round(at.y) - 16);
   });
-  // click on empty canvas (or bare wire layer) clears the selection
+  // press on empty canvas: clear, and rubber-band if the pointer moves
   dom.canvas.addEventListener('pointerdown', (e) => {
-    if (e.target === dom.canvas || e.target === dom.wires) select(null);
+    if (e.target !== dom.canvas && e.target !== dom.wires) return;
+    if (e.button !== 0) return;
+    startMarquee(e);
   });
 }
 
@@ -364,7 +372,7 @@ function addModule(type, x, y) {
   state.modules.push(mod);
   commit();
   dom.canvas.append(renderCard(mod));
-  select({ kind: 'module', id: mod.id });
+  selectModules([mod.id]);
   renderParamsStrip();
   updateHint();
 }
@@ -374,7 +382,9 @@ function updateHint() {
   if (hint) hint.hidden = state.modules.length > 0;
 }
 
-function removeModule(id) {
+// Drops the module and its wires without touching history, so deleting a
+// whole selection can be recorded as one step.
+function removeModuleSilently(id) {
   state.modules = state.modules.filter((m) => m.id !== id);
   state.wires = state.wires.filter((w) => {
     const keep = w.from.module !== id && w.to.module !== id;
@@ -384,13 +394,14 @@ function removeModule(id) {
   const card = cardEls.get(id);
   if (card) card.remove();
   cardEls.delete(id);
+  state.selected.delete(id);
+}
+
+function removeModule(id) {
+  removeModuleSilently(id);
   commit();
   renderParamsStrip();
-  if (state.selection && state.selection.kind === 'module' && state.selection.id === id) {
-    select(null);
-  } else {
-    renderDebugger(); // the deleted module may have been the fallback target
-  }
+  renderDebugger(); // the deleted module may have been the debugger's target
   updateHint();
 }
 
@@ -474,9 +485,7 @@ function renderCard(mod) {
   card.append(portRow(mod, d.outputs, 'out'));
 
   applyRunDecorations(mod.id, card);
-  if (state.selection && state.selection.kind === 'module' && state.selection.id === mod.id) {
-    card.classList.add('selected');
-  }
+  if (state.selected.has(mod.id)) card.classList.add('selected');
   cardEls.set(mod.id, card);
   return card;
 }
@@ -645,25 +654,41 @@ function rulesEditor(mod, p) {
 function startCardDrag(e, mod, card, header) {
   if (e.button !== 0) return;
   if (e.target.closest('button')) return;
-  select({ kind: 'module', id: mod.id });
+
+  const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+  if (additive) selectModules([mod.id], { additive: true });
+  else if (!state.selected.has(mod.id)) selectModules([mod.id]);
+  // dragging a member of a multi-selection moves the whole set
+  const group = state.selected.has(mod.id)
+    ? state.modules.filter((m) => state.selected.has(m.id))
+    : [mod];
+  const origins = group.map((m) => ({ m, x: m.x, y: m.y }));
+
   const startX = e.clientX;
   const startY = e.clientY;
-  const origX = mod.x;
-  const origY = mod.y;
   let moved = false;
   interacting = true;
   try { header.setPointerCapture(e.pointerId); } catch { /* inactive pointer (synthetic event) */ }
 
   const onMove = (ev) => {
-    const nx = Math.max(0, origX + Math.round((ev.clientX - startX) / zoom));
-    const ny = Math.max(0, origY + Math.round((ev.clientY - startY) / zoom));
-    if (nx === mod.x && ny === mod.y) return;
-    mod.x = nx;
-    mod.y = ny;
-    moved = true;
-    card.style.left = nx + 'px';
-    card.style.top = ny + 'px';
-    updateWiresFor(mod.id);
+    const dx = Math.round((ev.clientX - startX) / zoom);
+    const dy = Math.round((ev.clientY - startY) / zoom);
+    let changed = false;
+    for (const o of origins) {
+      const nx = Math.max(0, o.x + dx);
+      const ny = Math.max(0, o.y + dy);
+      if (nx === o.m.x && ny === o.m.y) continue;
+      o.m.x = nx;
+      o.m.y = ny;
+      changed = true;
+      const c = cardEls.get(o.m.id);
+      if (c) {
+        c.style.left = nx + 'px';
+        c.style.top = ny + 'px';
+      }
+      updateWiresFor(o.m.id);
+    }
+    if (changed) moved = true;
   };
   const onEnd = () => {
     header.removeEventListener('pointermove', onMove);
@@ -708,7 +733,7 @@ function renderWire(w) {
     g.append(hit, line);
     g.addEventListener('pointerdown', (e) => {
       e.stopPropagation();
-      select({ kind: 'wire', id: w.id });
+      selectWire(w.id);
     });
     dom.wires.append(g);
     wireEls.set(w.id, g);
@@ -717,8 +742,7 @@ function renderWire(w) {
   const b = portCenter(w.to.module, w.to.port, 'in');
   const d = a && b ? bezier(a, b) : '';
   for (const path of g.children) path.setAttribute('d', d);
-  g.classList.toggle('selected',
-    !!(state.selection && state.selection.kind === 'wire' && state.selection.id === w.id));
+  g.classList.toggle('selected', state.selectedWire === w.id);
 }
 
 function updateWiresFor(moduleId) {
@@ -799,15 +823,135 @@ function startWireDrag(e, moduleId, portName, portEl) {
 
 /* ---------- selection & keyboard ---------- */
 
-function select(sel) {
-  state.selection = sel;
-  for (const [id, card] of cardEls) {
-    card.classList.toggle('selected', !!(sel && sel.kind === 'module' && sel.id === id));
-  }
-  for (const [id, g] of wireEls) {
-    g.classList.toggle('selected', !!(sel && sel.kind === 'wire' && sel.id === id));
-  }
+function paintSelection() {
+  for (const [id, card] of cardEls) card.classList.toggle('selected', state.selected.has(id));
+  for (const [id, g] of wireEls) g.classList.toggle('selected', state.selectedWire === id);
   renderDebugger();
+}
+
+// `additive` is shift/ctrl-click: toggle this module in or out and leave the
+// rest of the selection alone.
+function selectModules(ids, { additive = false } = {}) {
+  if (!additive) state.selected.clear();
+  for (const id of ids) {
+    if (additive && state.selected.has(id)) state.selected.delete(id);
+    else state.selected.add(id);
+  }
+  state.selectedWire = null;
+  paintSelection();
+}
+
+function selectWire(id) {
+  state.selected.clear();
+  state.selectedWire = id;
+  paintSelection();
+}
+
+function clearSelection() {
+  state.selected.clear();
+  state.selectedWire = null;
+  paintSelection();
+}
+
+/* ---------- marquee, delete, clipboard ---------- */
+
+// Rubber-band select. The box lives inside #canvas so it scales with the zoom
+// and needs no coordinate conversion of its own once the corners are canvas
+// points.
+function startMarquee(e) {
+  const origin = canvasPoint(e.clientX, e.clientY);
+  const box = el('div', { class: 'marquee' });
+  let dragged = false;
+
+  const onMove = (ev) => {
+    const at = canvasPoint(ev.clientX, ev.clientY);
+    if (!dragged && Math.hypot(at.x - origin.x, at.y - origin.y) < 4) return;
+    if (!dragged) {
+      dragged = true;
+      interacting = true;
+      dom.canvas.append(box);
+    }
+    const left = Math.min(origin.x, at.x);
+    const top = Math.min(origin.y, at.y);
+    box.style.left = left + 'px';
+    box.style.top = top + 'px';
+    box.style.width = Math.abs(at.x - origin.x) + 'px';
+    box.style.height = Math.abs(at.y - origin.y) + 'px';
+
+    const right = left + Math.abs(at.x - origin.x);
+    const bottom = top + Math.abs(at.y - origin.y);
+    const hits = state.modules.filter((m) => {
+      const card = cardEls.get(m.id);
+      if (!card) return false;
+      // offsetWidth/Height are layout pixels, already free of the zoom
+      return m.x < right && m.x + card.offsetWidth > left &&
+             m.y < bottom && m.y + card.offsetHeight > top;
+    });
+    selectModules(hits.map((m) => m.id));
+  };
+  const finish = () => {
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup', finish);
+    document.removeEventListener('pointercancel', finish);
+    box.remove();
+    interacting = false;
+    if (!dragged) clearSelection(); // a plain click on empty canvas
+  };
+  document.addEventListener('pointermove', onMove);
+  document.addEventListener('pointerup', finish);
+  document.addEventListener('pointercancel', finish);
+}
+
+function deleteSelection() {
+  if (state.selectedWire) {
+    removeWire(state.selectedWire);
+    state.selectedWire = null;
+    commit();
+    paintSelection();
+    return;
+  }
+  const ids = [...state.selected];
+  if (!ids.length) return;
+  for (const id of ids) removeModuleSilently(id);
+  commit(); // the whole set is one undo step
+  clearSelection();
+  renderParamsStrip();
+  updateHint();
+}
+
+function copySelection() {
+  const ids = new Set(state.selected);
+  if (!ids.size) return;
+  clipboard = {
+    modules: structuredClone(state.modules.filter((m) => ids.has(m.id))),
+    // only wires with both ends inside the selection can be reproduced
+    wires: structuredClone(
+      state.wires.filter((w) => ids.has(w.from.module) && ids.has(w.to.module))),
+  };
+  toast(`${clipboard.modules.length} 個のモジュールをコピーしました`);
+}
+
+function pasteClipboard() {
+  if (!clipboard || !clipboard.modules.length) return;
+  const remap = new Map();
+  const pasted = clipboard.modules.map((m) => {
+    const copy = structuredClone(m);
+    copy.id = nextId('m');
+    remap.set(m.id, copy.id);
+    copy.x = Math.max(0, (Number(m.x) || 0) + 30);
+    copy.y = Math.max(0, (Number(m.y) || 0) + 30);
+    return copy;
+  });
+  const wires = clipboard.wires.map((w) => ({
+    id: nextId('w'),
+    from: { module: remap.get(w.from.module), port: w.from.port },
+    to: { module: remap.get(w.to.module), port: w.to.port },
+  }));
+  state.modules.push(...pasted);
+  state.wires.push(...wires);
+  commit();
+  renderPipe();
+  selectModules(pasted.map((m) => m.id)); // so it can be dragged into place
 }
 
 // A text field owns its own undo stack and caret keys; a <select> does not,
@@ -837,18 +981,23 @@ function bindKeys() {
       if (y || e.shiftKey) redo(); else undo();
       return;
     }
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && 'acvx'.includes(e.key.toLowerCase())) {
+      if (isFormField(document.activeElement)) return;
+      const k = e.key.toLowerCase();
+      if (k === 'a') { e.preventDefault(); selectModules(state.modules.map((m) => m.id)); return; }
+      if (k === 'c') { e.preventDefault(); copySelection(); return; }
+      if (k === 'x') { e.preventDefault(); copySelection(); deleteSelection(); return; }
+      if (k === 'v') { e.preventDefault(); pasteClipboard(); return; }
+    }
+    if (e.key === 'Escape') {
+      clearSelection();
+      return;
+    }
     if (e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (isFormField(document.activeElement)) return;
-    const sel = state.selection;
-    if (!sel) return;
+    if (!state.selected.size && !state.selectedWire) return;
     e.preventDefault();
-    if (sel.kind === 'wire') {
-      removeWire(sel.id);
-      commit();
-    } else {
-      removeModule(sel.id);
-    }
-    select(null);
+    deleteSelection();
   });
 
   // leaving a field ends its coalescing run, so returning to it later is a
@@ -957,8 +1106,8 @@ function bindDebugger() {
 }
 
 function debugTargetModule() {
-  if (state.selection && state.selection.kind === 'module') {
-    const m = state.modules.find((x) => x.id === state.selection.id);
+  for (const id of state.selected) {
+    const m = state.modules.find((x) => x.id === id);
     if (m) return m;
   }
   return findOutputModule();
@@ -1110,7 +1259,8 @@ function newPipe() {
   state.wires = [];
   state.savedId = null;
   state.counter = 1;
-  state.selection = null;
+  state.selected.clear();
+  state.selectedWire = null;
   state.lastDebug = null;
   state.runParams = {};
   renderPipe();
@@ -1192,7 +1342,8 @@ async function loadPipe(id) {
     state.modules = clean.modules;
     state.wires = clean.wires;
     state.savedId = pipe.id || id;
-    state.selection = null;
+    state.selected.clear();
+    state.selectedWire = null;
     state.lastDebug = null;
     state.runParams = {};
     seedCounter();

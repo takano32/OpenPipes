@@ -391,6 +391,19 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
   `number`, `select`, `list`, `rules` — rules/list rows have + / ✕ buttons).
   Input ports are small circles on the top edge (spread evenly), output ports
   on the bottom edge. Ports show the port name in a tooltip (`title` attr).
+- **Selection** is a set of modules plus at most one wire. Click a card header
+  to select it alone; shift/ctrl-click toggles it in or out; drag on empty
+  canvas to rubber-band everything the box touches; `Ctrl`/`Cmd`+`A` selects
+  every module; `Escape` clears. Dragging any selected card moves the whole
+  set, as one undo step. `Delete`/`Backspace` removes the selected wire, or
+  every selected module and its wires — again one step.
+- **Copy / paste** with `Ctrl`/`Cmd`+`C` / `X` / `V`, within the page: reading
+  the system clipboard needs a permission prompt and a graph fragment is not
+  useful in another application. Copying takes the selected modules and only
+  those wires with **both** ends inside the selection. Pasting gives every
+  module a fresh id, remaps the wires onto them, offsets by (30, 30), records
+  one undo step, and leaves the new copies selected so they can be dragged
+  into place.
 - Wires: mousedown on an **output** port starts a ghost bezier following the
   cursor; releasing on an input port creates the wire (replacing any existing
   wire into that input). Bezier control points are vertical (`dy`), Yahoo

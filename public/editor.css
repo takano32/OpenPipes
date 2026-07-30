@@ -379,6 +379,15 @@ button, input, select { font-family: inherit; color: inherit; }
 
 .module-card.selected { outline: 2px solid var(--accent); z-index: 2; }
 
+.marquee {
+  position: absolute;
+  z-index: 4;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background: rgba(47, 128, 237, 0.1);
+  pointer-events: none;
+}
+
 .module-card.error-ring {
   border-color: var(--danger);
   box-shadow: 0 0 0 2px var(--danger), var(--shadow);

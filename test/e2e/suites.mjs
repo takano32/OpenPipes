@@ -357,6 +357,95 @@ export const suites = [
   check('zoom stops at the bottom of the range', (await page.eval(label)) === '40%');
 }],
 
+/* ------------------------------------------ multi-select and copy / paste */
+['multi-select', async ({ page, origin, check }) => {
+  const selected = () => page.eval(`document.querySelectorAll('.module-card.selected').length`);
+  const headerAt = (i) => page.eval(`(() => { const r = document.querySelectorAll('.module-card')[${i}]
+    .querySelector('.card-header').getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  const clickHeader = (i, mods = {}) => page.eval(`(() => {
+    const h = document.querySelectorAll('.module-card')[${i}].querySelector('.card-header');
+    const init = { bubbles: true, button: 0, shiftKey: ${!!mods.shift} };
+    h.dispatchEvent(new PointerEvent('pointerdown', init));
+    h.dispatchEvent(new PointerEvent('pointerup', init));
+    return true; })()`);
+
+  await page.goto(`${origin}/`);
+  await page.dropModule('item_builder', 400, 150);
+  await page.dropModule('reverse', 700, 150);
+  await page.dropModule('output', 400, 430);
+  check('the last dropped module is selected', (await selected()) === 1);
+
+  await clickHeader(0);
+  check('a plain click selects one', (await selected()) === 1);
+  await clickHeader(1, { shift: true });
+  check('shift-click adds to the selection', (await selected()) === 2);
+  await clickHeader(1, { shift: true });
+  check('shift-clicking again removes it', (await selected()) === 1);
+
+  await page.key('a', { ctrl: true });
+  check('Ctrl+A selects every module', (await selected()) === 3);
+  await page.eval(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  check('Escape clears the selection', (await selected()) === 0);
+
+  // rubber band over the two modules on the upper row
+  const band = await page.eval(`(() => {
+    const c = document.querySelector('#canvas').getBoundingClientRect();
+    const cards = [...document.querySelectorAll('.module-card')];
+    const top = cards.map((m) => m.getBoundingClientRect()).filter((r) => r.top < c.top + 300);
+    return { x1: c.left + 5, y1: c.top + 5,
+             x2: Math.max(...top.map((r) => r.right)) + 10,
+             y2: Math.min(...top.map((r) => r.bottom)) - 5 }; })()`);
+  await page.drag(band.x1, band.y1, band.x2, band.y2);
+  check('a rubber band selects what it covers', (await selected()) === 2, band);
+  check('the marquee is gone afterwards', await page.eval(`!document.querySelector('.marquee')`));
+
+  // dragging one member moves the whole set
+  await page.key('a', { ctrl: true });
+  const before = await page.eval(`[...document.querySelectorAll('.module-card')].map((m) => m.style.left)`);
+  const head = await headerAt(0);
+  await page.drag(head.x, head.y, head.x + 60, head.y);
+  const after = await page.eval(`[...document.querySelectorAll('.module-card')].map((m) => m.style.left)`);
+  check('dragging a selected card moves all of them',
+    after.every((v, i) => parseFloat(v) - parseFloat(before[i]) === 60), { before, after });
+  await page.key('z', { ctrl: true });
+  check('the group move is a single undo step',
+    (await page.eval(`[...document.querySelectorAll('.module-card')].map((m) => m.style.left)`))
+      .join() === before.join());
+
+  // copy and paste
+  await page.dropModule('filter', 900, 300);   // clears the selection to one
+  await clickHeader(0);
+  await clickHeader(2, { shift: true });
+  await page.key('c', { ctrl: true });
+  await page.key('v', { ctrl: true });
+  check('paste adds the copied modules', (await page.counts()).modules === 6);
+  check('the pasted copies end up selected', (await selected()) === 2);
+  check('paste is one undo step', await (async () => {
+    await page.key('z', { ctrl: true });
+    return (await page.counts()).modules === 4;
+  })());
+
+  // wires between copied modules come along; dangling ones do not
+  await page.goto(`${origin}/`);
+  await page.dropModule('item_builder', 400, 150);
+  await page.dropModule('output', 420, 430);
+  const p = await page.portPair();
+  await page.drag(p.ox, p.oy, p.ix, p.iy);
+  check('one wire to start with', (await page.counts()).wires === 1);
+  await page.key('a', { ctrl: true });
+  await page.key('c', { ctrl: true });
+  await page.key('v', { ctrl: true });
+  const c = await page.counts();
+  check('copying both ends brings the wire too', c.modules === 4 && c.wires === 2, c);
+
+  await page.key('a', { ctrl: true });
+  await page.key('x', { ctrl: true });
+  check('cut empties the canvas', (await page.counts()).modules === 0);
+  await page.key('v', { ctrl: true });
+  check('and paste brings it back', (await page.counts()).modules === 4);
+}],
+
 /* --------------------------------------------------------- saved pipe list */
 ['saved pipes', async ({ page, origin, check }) => {
   await page.goto(`${origin}/`);
