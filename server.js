@@ -8,6 +8,7 @@ import { runPipe, catalog, PipeError } from './lib/engine.js';
 import { buildJSONFeed, buildRSS } from './lib/feed.js';
 import { httpError } from './lib/errors.js';
 import { openStore, validatePipeBody } from './lib/store.js';
+import { secretEquals } from './lib/auth.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -116,13 +117,6 @@ const CONTENT_TYPES = {
   '.ico': 'image/x-icon',
   '.json': 'application/json; charset=utf-8',
 };
-
-// Hashing first so the comparison is over equal-length buffers whatever the
-// inputs were.
-function secretEquals(a, b) {
-  const digest = (v) => crypto.createHash('sha256').update(String(v), 'utf8').digest();
-  return crypto.timingSafeEqual(digest(a), digest(b));
-}
 
 function requireAuth(req) {
   if (!AUTH_PASSWORD) return;

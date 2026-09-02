@@ -1,10 +1,15 @@
 // OpenPipes test suite — dependency-free, no network (all fetches are canned).
 import assert from 'node:assert/strict';
 import path from 'node:path';
+import { createHash, generateKeyPairSync, sign as nodeCryptoSign } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { parseFeed, buildRSS, buildJSONFeed, escapeXml } from '../lib/feed.js';
 import { runPipe, catalog, PipeError } from '../lib/engine.js';
 import { openStore, slugify, validatePipeBody } from '../lib/store.js';
+import {
+  createPkce, decodeJwt, matchesAllowlist, parseAllowlist, parseCookies,
+  safeReturnTo, secretEquals, serializeCookie, verifyIdToken,
+} from '../lib/auth.js';
 
 // ---------------------------------------------------------------- harness
 
@@ -1273,6 +1278,150 @@ test('store: validatePipeBody rejects what a save used to reject', () => {
   for (const body of bad) {
     assert.throws(() => validatePipeBody(body), { status: 400 }, JSON.stringify(body));
   }
+});
+
+// ------------------------------------------------------------------ auth
+
+test('auth: cookies parse into a null-prototype object', () => {
+  const jar = parseCookies('openpipes_session=abc.def; openpipes_oauth=xyz; junk; =empty; a=1=2');
+  assert.equal(Object.getPrototypeOf(jar), null);
+  assert.equal(jar.openpipes_session, 'abc.def');
+  assert.equal(jar.openpipes_oauth, 'xyz');
+  assert.equal(jar.a, '1=2', 'only the first = separates');
+  assert.equal(jar.junk, undefined);
+  assert.equal(jar.constructor, undefined, 'a prototype key must not leak through');
+  assert.equal(parseCookies(undefined).anything, undefined);
+  assert.equal(parseCookies('x=1; x=2').x, '1', 'the first occurrence wins');
+});
+
+test('auth: a session cookie carries the attributes it must', () => {
+  const cookie = serializeCookie('openpipes_session', 'tok', {
+    path: '/', httpOnly: true, sameSite: 'Lax', maxAge: 2592000, secure: true,
+  });
+  assert.match(cookie, /^openpipes_session=tok(;|$)/);
+  for (const attr of ['Path=/', 'Max-Age=2592000', 'HttpOnly', 'SameSite=Lax', 'Secure']) {
+    assert.ok(cookie.includes(attr), `${attr} missing from ${cookie}`);
+  }
+  const plain = serializeCookie('openpipes_session', '', { path: '/', httpOnly: true, sameSite: 'Lax', maxAge: 0 });
+  assert.ok(plain.includes('Max-Age=0'));
+  assert.equal(plain.includes('Secure'), false, 'no Secure over plain http');
+});
+
+test('auth: return_to only ever points back at this server', () => {
+  for (const good of ['/', '/?pipe=x', '/a/b', '/?a=1&b=2#frag']) {
+    assert.equal(safeReturnTo(good), good);
+  }
+  for (const bad of ['//evil.example', '/\\evil.example', 'https://evil.example', 'evil',
+                     '', undefined, null, 42, '/ok\nSet-Cookie: x', '/' + 'a'.repeat(3000)]) {
+    assert.equal(safeReturnTo(bad), '/', JSON.stringify(bad));
+  }
+});
+
+test('auth: the allowlist matches emails and whole domains, case-insensitively', () => {
+  const entries = parseAllowlist(' @example.com, Bob@GMAIL.com ,, ');
+  assert.deepEqual(entries, ['@example.com', 'bob@gmail.com']);
+  assert.equal(matchesAllowlist('carol@example.com', entries), true);
+  assert.equal(matchesAllowlist('CAROL@Example.COM', entries), true);
+  assert.equal(matchesAllowlist('bob@gmail.com', entries), true);
+  assert.equal(matchesAllowlist('alice@other.com', entries), false);
+  assert.equal(matchesAllowlist('eve@notexample.com', entries), false,
+    'a domain entry must match the whole domain');
+  assert.equal(matchesAllowlist('', entries), false);
+  assert.equal(matchesAllowlist(undefined, entries), false);
+  // an empty list is no restriction: anyone with an account may sign in
+  assert.deepEqual(parseAllowlist(''), []);
+  assert.equal(matchesAllowlist('anyone@anywhere.example', []), true);
+});
+
+test('auth: the PKCE challenge is the hash of the verifier', () => {
+  const { verifier, challenge } = createPkce();
+  assert.match(verifier, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(challenge, createHash('sha256').update(verifier).digest('base64url'));
+  assert.notEqual(createPkce().verifier, verifier);
+});
+
+test('auth: secretEquals compares without leaking length', () => {
+  assert.equal(secretEquals('s3cret', 's3cret'), true);
+  assert.equal(secretEquals('s3cret', 's3cre'), false);
+  assert.equal(secretEquals('', ''), true);
+});
+
+// One key pair for the whole file: generating RSA-2048 is slow enough to
+// notice, and every case below is about the token, not the key.
+const KEYS = generateKeyPairSync('rsa', { modulusLength: 2048 });
+const OTHER = generateKeyPairSync('rsa', { modulusLength: 2048 });
+
+const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+function signJwt(header, payload, privateKey = KEYS.privateKey) {
+  const input = b64({ alg: 'RS256', typ: 'JWT', ...header }) + '.' + b64(payload);
+  const signature = privateKey
+    ? nodeCryptoSign('sha256', Buffer.from(input), privateKey).toString('base64url')
+    : '';
+  return input + '.' + signature;
+}
+
+const NOW = Date.UTC(2026, 8, 1);
+const CLAIMS = {
+  iss: 'https://accounts.google.com',
+  aud: 'client-id.apps.googleusercontent.com',
+  sub: '1234567890',
+  email: 'user@example.com',
+  email_verified: true,
+  nonce: 'the-nonce',
+  iat: Math.floor(NOW / 1000) - 30,
+  exp: Math.floor(NOW / 1000) + 3600,
+};
+const EXPECT = {
+  key: KEYS.publicKey,
+  issuer: 'https://accounts.google.com',
+  clientId: CLAIMS.aud,
+  nonce: 'the-nonce',
+  now: NOW,
+};
+
+test('auth: a well-formed id_token verifies and gives back its claims', () => {
+  const payload = verifyIdToken(signJwt({ kid: 'k1' }, CLAIMS), EXPECT);
+  assert.equal(payload.sub, '1234567890');
+  assert.equal(payload.email, 'user@example.com');
+  assert.equal(decodeJwt(signJwt({ kid: 'k1' }, CLAIMS)).header.kid, 'k1',
+    'the caller picks its key by kid before verifying');
+});
+
+test('auth: an id_token is rejected for every reason it should be', () => {
+  const bad = (label, token, expect = EXPECT) =>
+    assert.throws(() => verifyIdToken(token, expect), Error, label);
+
+  bad('alg: none', signJwt({ alg: 'none' }, CLAIMS, null));
+  bad('alg: HS256', signJwt({ alg: 'HS256' }, CLAIMS));
+  bad('signed with another key', signJwt({}, CLAIMS, OTHER.privateKey));
+  bad('wrong issuer', signJwt({}, { ...CLAIMS, iss: 'https://evil.example' }));
+  bad('wrong audience', signJwt({}, { ...CLAIMS, aud: 'someone-else' }));
+  bad('audience array without us', signJwt({}, { ...CLAIMS, aud: ['a', 'b'] }));
+  bad('expired', signJwt({}, { ...CLAIMS, exp: Math.floor(NOW / 1000) - 61 }));
+  bad('no exp at all', signJwt({}, { ...CLAIMS, exp: undefined }));
+  bad('exp as a string', signJwt({}, { ...CLAIMS, exp: String(CLAIMS.exp) }));
+  bad('issued in the future', signJwt({}, { ...CLAIMS, iat: Math.floor(NOW / 1000) + 300 }));
+  bad('nonce mismatch', signJwt({}, { ...CLAIMS, nonce: 'someone elses' }));
+  bad('no nonce', signJwt({}, { ...CLAIMS, nonce: undefined }));
+  bad('no sub', signJwt({}, { ...CLAIMS, sub: undefined }));
+  bad('empty sub', signJwt({}, { ...CLAIMS, sub: '' }));
+  bad('two parts only', signJwt({}, CLAIMS).split('.').slice(0, 2).join('.'));
+  bad('payload is not JSON', b64({ alg: 'RS256' }) + '.bm90IGpzb24.sig');
+  bad('payload is an array', signJwt({}, [1, 2, 3]));
+  bad('not a string at all', 12345);
+  bad('no key for it', signJwt({}, CLAIMS), { ...EXPECT, key: null });
+
+  // the tolerances are two-sided: just-expired and just-issued still pass
+  assert.ok(verifyIdToken(signJwt({}, { ...CLAIMS, exp: Math.floor(NOW / 1000) - 30 }), EXPECT));
+  assert.ok(verifyIdToken(signJwt({}, { ...CLAIMS, iat: Math.floor(NOW / 1000) + 30 }), EXPECT));
+});
+
+test('auth: an issuer without its scheme is the same issuer', () => {
+  // Google has always issued `accounts.google.com` for tokens from
+  // `https://accounts.google.com`
+  const token = signJwt({}, { ...CLAIMS, iss: 'accounts.google.com' });
+  assert.equal(verifyIdToken(token, EXPECT).sub, CLAIMS.sub);
+  assert.throws(() => verifyIdToken(signJwt({}, { ...CLAIMS, iss: 'google.com' }), EXPECT));
 });
 
 // ---------------------------------------------------------------- runner
