@@ -36,13 +36,17 @@ Conventions:
 - `node --check public/editor.js` must pass (CI runs it; the editor is only
   executed by the browser suite).
 - The browser suite (`npm run test:e2e`) takes 5–9 minutes on the owner's
-  machine and loads it heavily. Run it at most once, at the end, or ask the
-  owner whether to push a branch and let GitHub Actions run it instead. Kill
-  every server and browser you start (`pkill -f server.js` etc. if in doubt).
+  machine and loads it heavily. Do not run it whole locally: task 1 adds an
+  `E2E_ONLY=<substring>` filter to `run.mjs`; run only the suite you touched
+  with it and leave the full run to GitHub Actions after the owner pushes.
+  Kill every server and browser you start (`pkill -f server.js` etc. if in
+  doubt).
 - One commit per task (tasks 2 and 3 may be one commit each or split as
   marked). Commit messages follow the existing style: a title line, then
   short paragraphs explaining what changed and why, wrapped at ~78 columns.
-  See `git log -3 --format=%B` for examples. Do not push unless asked.
+  See `git log -3 --format=%B` for examples. Do not push unless asked; when
+  a task is done, say it is ready to push — the owner pushes and CI runs the
+  browser suite.
 - Never log tokens, codes, cookies or secrets. Log `login <userId>` and
   `logout <userId>` only.
 
@@ -69,7 +73,7 @@ Where things are today (read these files first):
 | `OPENPIPES_DB` | Path of the SQLite file. Default `data/openpipes.db` (relative to the repo root). `:memory:` is accepted and is what tests use. The parent directory is created at boot. Replaces `OPENPIPES_DATA`, which is removed. |
 | `OPENPIPES_GOOGLE_CLIENT_ID` | Turns on **google** mode together with the next two. |
 | `OPENPIPES_GOOGLE_CLIENT_SECRET` | Google requires the secret at the token endpoint even with PKCE. |
-| `OPENPIPES_BASE_URL` | Public origin, e.g. `https://pipes.example.com`. Required in google mode: the OAuth `redirect_uri` must match what is registered exactly, and cookies are `Secure` iff this is https. Allowed in any mode; when set, `baseUrlOf(req)` returns it instead of `http://<Host>`. Must be an http(s) URL with no path, query or fragment; a trailing slash is stripped. |
+| `OPENPIPES_BASE_URL` | Public origin, e.g. `https://pipes.example.com`. Required in google mode: the OAuth `redirect_uri` must match what is registered exactly, and cookies are `Secure` iff this is https. Allowed in any mode; when set, `baseUrlOf(req)` returns it instead of `http://<Host>`. Must be an http(s) URL with no path, query or fragment; a trailing slash is stripped. It must also be the origin people actually use in the browser: the CSRF check compares the `Origin` header to it. |
 | `OPENPIPES_ALLOWED_USERS` | Optional, google mode only. Comma-separated entries, each an email (`alice@example.com`) or a domain (`@example.com`), matched case-insensitively against the verified email of the id_token. Unset = anyone can sign in; boot prints a warning line saying so. |
 | `OPENPIPES_OIDC_ISSUER` | Default `https://accounts.google.com`. Endpoints come from `<issuer>/.well-known/openid-configuration`. Tests point this at the fake issuer. (Side effect: any OIDC provider works, but the UI still says Google.) |
 | `OPENPIPES_PASSWORD`, `OPENPIPES_USER` | Unchanged: **basic** mode. |
@@ -127,8 +131,10 @@ CREATE INDEX IF NOT EXISTS pipes_owner ON pipes(owner_id, saved_at DESC);
 ISO strings compare correctly as text, so expiry checks are plain `<=`.
 
 The store is **synchronous** (`node:sqlite` is), a class with these methods.
-Errors it raises carry a `status` property exactly like `httpError` in
-`server.js`, so the existing error path maps them to JSON responses.
+Move `httpError` from `server.js` into a new `lib/errors.js` and import it
+from `server.js`, `lib/store.js` and `lib/auth.js`: errors the store raises
+carry a `status` exactly like the ones the router already maps to JSON.
+`DatabaseSync` must be constructed with `new`.
 
 ```
 openStore({ dbPath, systemPipesDir })      -> Store
@@ -144,9 +150,11 @@ Store.deleteSession(token)                 -> void
 Store.purgeExpiredSessions()               -> void   (run at boot and hourly via setInterval(...).unref())
 
 Store.listPipes(ownerId)                   -> [{ id, name, savedAt, readOnly }]
-                                              own rows ORDER BY saved_at DESC, then system pipes by savedAt desc
+                                              own rows (readOnly false) ORDER BY saved_at DESC,
+                                              then system pipes (readOnly true) by savedAt desc
 Store.getPipe(id, ownerId)                 -> { id, name, savedAt, modules, wires, readOnly } | null
-                                              own row first, then a system pipe (readOnly: true), else null
+                                              own row first, then a system pipe (readOnly: true), else null;
+                                              ownerId === null skips the database and resolves system pipes only
 Store.savePipe(ownerId, { id?, name, modules, wires }) -> { id }
                                               id absent/empty: generate, INSERT
                                               id is a system id: throw 403 "This pipe is a built-in demo; save it as a copy"
@@ -168,7 +176,12 @@ from a missing one (404), so ids do not leak.
 `systemPipesDir` (= `assets/demo/pipes/`, the demo files moved there from
 `data/pipes/` with `git mv`). Validate each with the same validator the save
 endpoint uses (move that validator out of `server.js` into `lib/store.js` as
-`export function validatePipeBody(body)` and call it from both places).
+`export function validatePipeBody(body)` and call it from both places; it
+covers `name`, `modules` and `wires` exactly as `handleSavePipe` does today,
+while the `id` format check — 400 "Invalid pipe id" — stays with whatever
+code receives an id). A system pipe's id is the file's `id` field; it must
+match `PIPE_ID_RE` and the file name `<id>.json`, and a file that fails any
+of this makes boot fail loudly rather than being skipped.
 Keep them in a `Map` in memory; they are never written to the database.
 They are listed for everyone, loadable by everyone, `readOnly: true`, cannot
 be saved over or deleted, can be duplicated (that is just a save without an
@@ -227,14 +240,15 @@ and `server.js` (routes).
 
 1. No `openpipes_oauth` cookie or unparsable → 400 page.
 2. `error` query param → 400 page showing the (escaped) error code.
-3. `state` must equal the cookie's, compared through `secretEquals`-style
-   hashing → else 400 page.
+3. `state` must equal the cookie's, compared with `secretEquals` (move it
+   from `server.js` into `lib/auth.js` and import it back) → else 400 page.
 4. `POST <token_endpoint>` as `application/x-www-form-urlencoded`:
-   `grant_type=authorization_code`, `code`, `redirect_uri`, `client_id`,
-   `client_secret`, `code_verifier`. Use global `fetch` with
-   `AbortSignal.timeout(15000)` (not `fetchURL` — the issuer is operator
-   configuration, and tests use 127.0.0.1). Non-2xx or no `id_token` → 502
-   page.
+   `grant_type=authorization_code`, `code`, `redirect_uri` (the identical
+   string the authorize request carried), `client_id`, `client_secret`,
+   `code_verifier`. Use global `fetch` with `AbortSignal.timeout(15000)`
+   (not `fetchURL` — the issuer is operator configuration, and tests use
+   127.0.0.1). Non-2xx or no `id_token` → 502 page. The `access_token` in
+   the response is not used for anything; ignore it.
 5. Verify the id_token (below) with the cookie's nonce → failure → 400 page.
 6. Allowlist (when set): require `email_verified === true` and a match →
    else 403 page.
@@ -259,7 +273,9 @@ mismatch), 「Google からエラーが返されました: <error>」, 「トー
 first login attempt, memoised on success; a failure is not memoised so the
 next attempt retries. Boot never contacts the issuer, so the server starts
 even when Google is unreachable. Use `issuer`, `authorization_endpoint`,
-`token_endpoint`, `jwks_uri` from it.
+`token_endpoint`, `jwks_uri` from it. The document's `issuer` must equal the
+configured issuer (ignoring one trailing slash); otherwise treat discovery
+as failed.
 
 **JWKS.** Fetch `jwks_uri`, keep `kid → KeyObject` built with
 `crypto.createPublicKey({ key: jwk, format: 'jwk' })`. On an unknown `kid`
@@ -311,22 +327,32 @@ do not hardcode them.
 Route classes: `public` never authenticates; `api` requires a principal;
 `page` requires Basic auth in basic mode only. Keep the `writes` flag and
 `requireWritable()` as they are (read-only mode is orthogonal; auth is
-checked before it, as now).
+checked before it, as now). In `ROUTES` the `/auth/*` entries must come
+before the `/.*` static catch-all, or the page handler answers them with
+404. The server sends no CORS headers in any mode; do not add any — a
+cross-site preflight failing is part of the CSRF story below.
 
-`principalOf(req)` → `{ userId, user }` or `null`: none → `local`; basic →
-`local` when the header checks out, else throws the existing 401 with
-`WWW-Authenticate`; google → session cookie → `store.sessionUser(token)` or
-`null`. `api` routes call `requirePrincipal(req)` which throws 401 JSON
-`{ "error": "Sign in required" }` **without** `WWW-Authenticate` in google
-mode (a Basic prompt would be wrong there).
+`principalOf(req)` → `{ userId, user }` or `null`, and **never throws**:
+none → `{ userId: 'local', user: null }`; basic → the same when the Basic
+header checks out, else `null`; google → session cookie →
+`store.sessionUser(token)` → `{ userId, user }`, else `null`.
+`requirePrincipal(req)` returns the principal or throws the 401 of the
+mode: basic keeps today's `WWW-Authenticate: Basic …` response, google
+throws 401 JSON `{ "error": "Sign in required" }` **without**
+`WWW-Authenticate` (a Basic prompt would be wrong there), none never
+throws. `api` routes use `requirePrincipal`; `page` routes use it in basic
+mode only; `/api/config` uses `principalOf` and reports `user` only in
+google mode (`null` in none and basic — there is no user concept there).
 
 **CSRF** — cookie auth makes cross-site requests a concern for the first time:
 
 - For every request whose method is not `GET`/`HEAD`: if `OPENPIPES_BASE_URL`
   is set and an `Origin` header is present and it is not equal to
   `new URL(BASE_URL).origin` → 403 `{ "error": "Cross-site request refused" }`.
-  Checked in `dispatch` before the handler, for all modes (in none/basic mode
-  without a base URL the check is skipped).
+  `Origin: null` counts as a mismatch. Checked in `dispatch` before the
+  handler, for all modes (in none/basic mode without a base URL the check is
+  skipped). Browsers send `Origin` on every POST, same-origin included, so
+  the editor's own requests pass as long as people use the base URL.
 - `readJSONBody` now requires `Content-Type` matching `/^application\/json\b/i`
   → else 400 `Body must be JSON (Content-Type: application/json)`. A
   cross-site form or `no-cors` fetch cannot send that without a preflight.
@@ -365,8 +391,11 @@ keeps working for everyone because both are system pipes.
 `state.config` defaults to `{ readOnly: false, auth: 'none', user: null }`.
 
 - **Login gate.** In `init()`, right after `/api/config`: if
-  `config.auth === 'google' && !config.user`, show `#login-gate` and return
-  (no catalog fetch, no bindings). The gate is a full-viewport overlay above
+  `config.auth === 'google' && !config.user`, call `showGate()` and return
+  (no catalog fetch, no bindings; `#palette` stays empty, which is what the
+  browser suite checks). `showGate()` is one function, shared with the 401
+  path below: it unhides `#login-gate`, sets the button's `href`, and hides
+  `#user-menu`. The gate is a full-viewport overlay above
   everything (`position: fixed; inset: 0; z-index` above the top bar) with a
   centred card: the logo, the text
   「このサーバーを使うには Google アカウントでログインしてください。」 and
@@ -384,8 +413,9 @@ keeps working for everyone because both are system pipes.
 - **Load menu.** Rows come with `readOnly`. Own pipes first, then a divider
   row 「デモ」, then read-only rows. Read-only rows have the ⧉ duplicate
   button but no ✕ delete. The filter box (shown above six rows) must keep
-  working across both groups; hide the divider when every row under it is
-  hidden.
+  working across both groups: give the divider its own class and skip it in
+  the filter loop, which today assumes every child of `.menu-rows` carries
+  `data-name`; hide the divider when every row under it is hidden.
 - **Save-as-copy.** `loadPipe(id)` records `state.savedReadOnly =
   Boolean(pipe.readOnly)`. `savePipe()` includes `body.id` only when
   `state.savedId && !state.savedReadOnly`; on success sets
@@ -417,7 +447,7 @@ and `README.md` within the task that changes the behaviour, not at the end
    `handleSavePipe`, `slugify` moved out of `server.js`, and the new id
    scheme.
 3. `server.js`: open the store at boot (`OPENPIPES_DB`, `:memory:` support,
-   mkdir of the parent), `ensureLocalUser()`, replace `loadPipe` /
+   mkdir of the parent — skipped for `:memory:`), `ensureLocalUser()`, replace `loadPipe` /
    `handleListPipes` / `handleSavePipe` / `handleDeletePipe` / `handleGetPipe`
    / `handleRunSaved` with store calls using owner `local`, add `loaderFor`
    (1.6), `OPENPIPES_BASE_URL` parsing and `baseUrlOf` change, SIGINT/SIGTERM
@@ -443,19 +473,27 @@ and `README.md` within the task that changes the behaviour, not at the end
    Add HTTP tests: `POST /api/pipes` with `id: 'demo-merged'` → 403;
    `DELETE /api/pipes/demo-merged` → 403 and the demo is still listed;
    `GET /api/pipes` rows carry `readOnly`; a pipe whose Loop names a demo
-   still runs through `/pipes/demo-loop/run`.
+   still runs through `/pipes/demo-loop/run`; and HTTP case 13 of section 3
+   (base URL in feed links), since `OPENPIPES_BASE_URL` lands in this task.
 6. `test/e2e/run.mjs`: spawn with `OPENPIPES_DB: ':memory:'` instead of
-   `OPENPIPES_DATA`. `suites.mjs`: wherever a suite deletes or expects to
-   delete a demo pipe, duplicate first and delete the copy; the "duplicate
-   pipe" suite should still pass as is. Do not run the browser suite yet.
+   `OPENPIPES_DATA`, and drop the `mkdtemp`/`cp` of `data/pipes` together
+   with the `rm` in `cleanup` that went with it. Add an `E2E_ONLY`
+   environment variable: when set, only suites whose name contains it run
+   (a substring test in the `for (const [name, run] of suites)` loop). In
+   `suites.mjs` no suite deletes a demo today ("saved pipes" deletes its own
+   throwaway pipe and asserts the demos survive), so expect no change there;
+   if one turns up, duplicate first and delete the copy. Do not run the
+   browser suite yet.
 7. SPEC: ground rules (Node >= 22.13, `node:sqlite`), file layout, the
    "Saved pipe file" section becomes "Stored pipes" (schema, system pipes,
    `readOnly`, id scheme), HTTP API rows for 403/404 semantics, the store
    API. README: クイックスタート (Node 要件、`data/openpipes.db` ができること、
    `OPENPIPES_DB`)、デモパイプ節 (組み込み・読み取り専用・複製で自分のものになる)、
    パイプ定義 JSON 節の保存先の記述、バックアップの一文
-   (`sqlite3 data/openpipes.db ".backup backup.db"`、または停止してコピー。
-   WAL のため `-wal` `-shm` も一緒に)。
+   (`sqlite3 data/openpipes.db ".backup backup.db"` か、sqlite3 が無ければ
+   `node -e "new (require('node:sqlite').DatabaseSync)('data/openpipes.db').exec(\"VACUUM INTO 'backup.db'\")"`
+   のように `VACUUM INTO`、または停止してコピー。WAL のため `-wal` `-shm`
+   も一緒に。この node ワンライナーは動作確認済み)。
 
 ### Task 2 — `lib/auth.js` pure parts + unit tests (may share a commit with task 3)
 
@@ -490,7 +528,10 @@ Implement and unit-test, with no HTTP involved:
    pages, CSRF `Origin` check and the `Content-Type` requirement, `/api/config`
    new shape, session purge timer, boot log wording. Remove `authRequired`.
 3. `test/fake-issuer.mjs` (shared with the browser harness later) per
-   section 3.
+   section 3. In `server-tests.js` start it once at module level before the
+   runner loop (`const issuer = await startFakeIssuer(...)`) and close it
+   right after the loop, before the exit code is decided — an open listener
+   keeps the process alive and `npm test` would hang on success.
 4. HTTP tests per section 3. Update the two existing `deepEqual` config
    assertions to the new shape.
 5. SPEC: replace "Access control" with "Modes and access control" (three
@@ -503,7 +544,11 @@ Implement and unit-test, with no HTTP involved:
    「ウェブ アプリケーション」→ 承認済みのリダイレクト URI に
    `<OPENPIPES_BASE_URL>/auth/google/callback`)、環境変数の表、
    「未設定なら Google アカウントを持つ誰でもログインできる」と
-   `OPENPIPES_ALLOWED_USERS` の書き方、セッションは 30 日で Cookie は
+   `OPENPIPES_ALLOWED_USERS` の書き方、手元で試すなら Google は
+   `http://localhost:3000/auth/google/callback` のような localhost の http
+   リダイレクト URI を受け付けるので `OPENPIPES_BASE_URL=http://localhost:3000`
+   でよいこと、`OPENPIPES_BASE_URL` はブラウザで実際に使う URL でなければ
+   ならないこと (Origin 検査がこれと比較する)、セッションは 30 日で Cookie は
    HttpOnly、ユーザーごとにパイプは完全に分かれるが公開フィード URL は
    誰でも読めるので id が秘密であること、モードを切り替えると `local` の
    パイプは見えなくなること、リバースプロキシ配下では `OPENPIPES_BASE_URL`
@@ -520,16 +565,19 @@ Implement and unit-test, with no HTTP involved:
    and a second server in google mode (`OPENPIPES_GOOGLE_CLIENT_ID=test`,
    `…_SECRET=test-secret`, `OPENPIPES_BASE_URL=http://127.0.0.1:<port2>`,
    `OPENPIPES_OIDC_ISSUER=<issuer>`, `OPENPIPES_DB=:memory:`) and kills both
-   in `cleanup`. New suite `google login` against the second origin: the
-   gate is visible and the workspace is not interactive; clicking
-   「Google でログイン」 ends up back on the editor with `#user-menu`
-   visible and the name from the fake issuer; the load menu shows the demos
-   under 「デモ」 without ✕; saving a new pipe works; opening a demo and
-   saving toasts 「コピーとして保存しました」 and the id differs; logout
-   brings the gate back and `/api/pipes` answers 401 (check via
-   `page.eval(fetch(...))`). Existing suites keep running against the
-   none-mode server. Ask the owner before running the whole browser suite
-   locally; CI is preferred.
+   in `cleanup`. Extend the context handed to suites to `{ page, origin,
+   googleOrigin, check }`. New suite `google login` against `googleOrigin`,
+   navigating to exactly that string (`127.0.0.1`, not `localhost`: the
+   cookie and the Origin check are bound to it): the gate is visible and
+   `#palette` is empty; clicking 「Google でログイン」 ends up back on the
+   editor with `#user-menu` visible and the name from the fake issuer; the
+   load menu shows the demos under 「デモ」 without ✕; saving a new pipe
+   works; opening a demo and saving toasts 「コピーとして保存しました」 and
+   the id differs; logout brings the gate back and `/api/pipes` answers 401
+   (check via `page.eval(fetch(...))`). Existing suites keep running against
+   the none-mode server. Locally run only this suite
+   (`E2E_ONLY='google login' npm run test:e2e`); the full run is CI's job
+   after the owner pushes.
 5. SPEC "Frontend" section: gate, user menu, load menu groups, save-as-copy,
    401 handling. README 使い方: ログイン/ログアウトの一文と、デモは複製して
    使うこと。
@@ -563,8 +611,8 @@ pair generated at start, `kid: 'test-key'`.
   issuer + '/authorize', token_endpoint: issuer + '/token', jwks_uri: issuer +
   '/jwks', response_types_supported: ['code'], subject_types_supported:
   ['public'], id_token_signing_alg_values_supported: ['RS256'] }`.
-- `GET /authorize` → requires `response_type=code`, `client_id`,
-  `redirect_uri`, `state`, `nonce`, `code_challenge`,
+- `GET /authorize` → requires `response_type=code`, `client_id` equal to
+  the configured one, `redirect_uri`, `state`, `nonce`, `code_challenge`,
   `code_challenge_method=S256`; stores `{ nonce, challenge, redirectUri }`
   under a fresh random `code`; 302 to `redirect_uri?code=…&state=…`. Any
   missing parameter → 400 with the name in the body (so a broken client is
@@ -610,7 +658,8 @@ must let a test compute env from the port (it already accepts a function).
 3. **Callback failures.** Callback without the cookie → 400 HTML; with a
    wrong `state` → 400; `?error=access_denied` → 400 containing
    `access_denied`; the login route in none mode → 404.
-4. **Isolation.** Log in as A, save a pipe; log in as B (different `sub`):
+4. **Isolation.** Log in as A, save a pipe; log in as B (call
+   `issuer.setUser(...)` with a different `sub` before the second `login()`):
    B's list holds only demos; `GET /api/pipes/<A's id>` 404; `DELETE` → 200
    and A still sees it; `POST /api/pipes` with A's id → 404; A's
    `/pipes/<id>/run` is 200 with no cookie at all.
@@ -644,9 +693,12 @@ must let a test compute env from the port (it already accepts a function).
     helper that waits for exit.)
 12. **Basic mode on SQLite.** Existing password tests pass unchanged except
     the config shape (`auth: 'basic'`).
-13. **Base URL in feeds.** With `OPENPIPES_BASE_URL` set, the RSS
-    `<atom:link rel="self">` / `<link>` of `/pipes/demo-merged/run` starts
-    with it.
+13. **Base URL in feeds** (written in task 1). `OPENPIPES_BASE_URL:
+    'http://localhost:<port>'` — it must resolve to the running server,
+    because the demo pipe fetches `/demo/*.xml` relative to it and the suite
+    has no network. Request `http://127.0.0.1:<port>/pipes/demo-merged/run`
+    and assert the RSS `<link>` and `<atom:link rel="self">` start with
+    `http://localhost:`, i.e. the base URL rather than the Host header.
 
 ## 4. Acceptance checklist
 
@@ -673,9 +725,13 @@ must let a test compute env from the port (it already accepts a function).
   tests must not assert on stderr being empty.
 - `secretEquals` hashes both sides before `timingSafeEqual` so lengths never
   matter; reuse it for `state` comparison.
-- `Set-Cookie` with several cookies must be set as an array via
-  `res.setHeader('Set-Cookie', [a, b])`; `writeHead` with an object would
-  overwrite. `res.headers.getSetCookie()` is how tests read them.
+- Set cookies with `res.setHeader('Set-Cookie', [a, b])` (an array when
+  there are several) before `writeHead`; the headers object passed to
+  `writeHead` merges with them, but a `Set-Cookie` key inside that object
+  would replace them. `res.headers.getSetCookie()` is how tests read them.
+- Both test runners are a plain `for` loop with top-level `await` and rely
+  on the process exiting by itself on success: anything you leave listening
+  (the fake issuer, a stray server) turns a green run into a hang.
 - The engine's `loop` module treats a throw from `loadPipe` as a module
   error (recorded in `errors`, run continues); that is the behaviour test
   case 5 relies on.
