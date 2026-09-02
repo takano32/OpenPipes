@@ -36,7 +36,13 @@ assets/demo/tech.xml       built-in demo feed (RSS 2.0, tech news)
 assets/demo/world.xml      built-in demo feed (RSS 2.0, world news)
 assets/demo/pipes/*.json   the 4 built-in demo pipes, read-only for everyone
 data/openpipes.db          the database (created on first boot; not in git)
-test/run-tests.js          dependency-free test suite (`npm test`)
+test/run-tests.js          unit suite: engine, feed library, store, auth (`npm test`)
+test/server-tests.js       HTTP suite: spawns server.js per environment (`npm test`)
+test/fake-issuer.mjs       an OpenID Connect provider in miniature, for both suites
+test/e2e/run.mjs           browser suite runner (`npm run test:e2e`)
+test/e2e/driver.mjs        the small Chrome DevTools Protocol client it uses
+test/e2e/suites.mjs        the browser suites themselves
+.github/workflows/test.yml CI: unit + HTTP on Node 22 and 24, browser on 24
 docs/SPEC.md               this file
 README.md                  user documentation (Japanese)
 ```
@@ -504,7 +510,11 @@ There are three auth modes, derived from the environment at boot:
 | `OPENPIPES_OIDC_ISSUER` | Default `https://accounts.google.com`. Endpoints come from its discovery document; the tests point this at a fake issuer. Any OIDC provider therefore works, though the UI says Google |
 | `OPENPIPES_PASSWORD`, `OPENPIPES_USER` | Basic auth; `OPENPIPES_USER` defaults to `admin`. Credentials are compared after SHA-256 so the check is over equal-length buffers and leaks neither length nor prefix by timing |
 | `OPENPIPES_READONLY` | `1` refuses anything that modifies a stored pipe (`POST /api/pipes`, `DELETE /api/pipes/:id`) with 403, in every mode. Auth is checked first, so an unauthenticated write gets 401, not 403 |
-| `OPENPIPES_CACHE_TTL`, `OPENPIPES_ALLOW_PRIVATE`, `OPENPIPES_HOST`, `PORT` / `SERVER_PORT` | see the sections about each |
+| `OPENPIPES_CACHE_TTL` | Seconds a rendered feed is cached; default 300, `0` disables the store but keeps the ETag. See **Feed caching** |
+| `OPENPIPES_ALLOW_PRIVATE` | `1` lets pipes fetch non-public addresses. See `lib/feed.js` |
+| `PORT` | Listening port, default 3000 |
+| `SERVER_PORT` | Fallback for `PORT`: Pterodactyl-style panels export the container's one allocation under this name. `PORT` wins when both are set |
+| `OPENPIPES_HOST` | Address to bind. Unset means every interface, which is what a local run and a plain container want; a host that fronts the app with its own proxy can ask for `127.0.0.1` |
 
 The server **refuses to start** (message on stderr naming the variable, exit
 1) when only some of client id / client secret / base URL are set, when google
@@ -679,8 +689,8 @@ Single-page editor, Yahoo Pipes style: **vertical dataflow, top → bottom**
 (input ports on the top edge of a module card, output ports on the bottom edge).
 
 Layout: top bar (logo "OpenPipes", pipe-name input, buttons **New / Load ▾ /
-Save / Run ▶**, then the user menu in google mode) · left palette (modules grouped by category, drag onto canvas)
-· center canvas (large scrollable area, dotted grid, SVG layer for wires under
+Save / Run ▶**, then the user menu in google mode) · left palette (modules
+grouped by category, drag onto canvas) · center canvas (large scrollable area, dotted grid, SVG layer for wires under
 absolutely-positioned module cards) · bottom **debugger panel** (fixed ~230px,
 collapsible) showing the selected module's last output.
 
@@ -739,6 +749,12 @@ and whether that pipe is read-only):
   duplicate-id modules, wires whose endpoints don't exist, malformed
   list/rules rows) so a hand-edited file can't leave the canvas broken. Also offers "Open RSS" link to `/pipes/<id>/run` once saved.
   **New**: confirm() when there are unsaved changes.
+- **JSON files.** The load menu also carries 「⭳ JSON を書き出す」 and
+  「⭱ JSON を読み込む…」 (the latter hidden in read-only mode): a pipe file is
+  the unit people share, so the editor can write one out and read one back
+  with the server uninvolved. The export is `{ name, modules, wires }` —
+  neither `id`, `savedAt` nor `readOnly` — and an import is sanitized like a
+  load and counts as unsaved, since nothing on this server matches it yet.
 - **Save as a copy.** Loading a pipe records whether it is read-only, and
   `savePipe()` then omits `body.id`, so saving a demo creates a copy of your
   own and toasts 「コピーとして保存しました」 rather than 「保存しました」.
@@ -828,24 +844,64 @@ and an inline SVG-emoji favicon.
   "AI", "Rust", "Linux"; world: weather/economy/sports), `pubDate`s spread
   over 2026-07-20 .. 2026-07-29 (RFC 822 format), each item with link
   (`https://example.com/...`), description, guid.
-- `data/pipes/demo-tech-filter.json`: text_input `q` (default `"AI"`, prompt
+Four sample pipes ship in `assets/demo/pipes/`, as built-in read-only system
+pipes (see **Stored pipes**):
+
+- `demo-tech-filter.json`: text_input `q` (default `"AI"`, prompt
   "キーワード") + fetch_feed `/demo/tech.xml` → filter (permit, title contains
   `${q}`) → sort (pubDate desc) → truncate 5 → output. Sensible x/y layout
   (vertical chain, x≈340, y from 40 to ~640; text_input beside at x≈40).
-- `data/pipes/demo-merged.json`: fetch_feed `/demo/tech.xml` + fetch_feed
+- `demo-merged.json`: fetch_feed `/demo/tech.xml` + fetch_feed
   `/demo/world.xml` → union → unique (title) → sort (pubDate desc) → output.
   Two columns feeding the union.
+- `demo-loop.json`: both demo feeds → sort (pubDate desc) → truncate 6 → loop
+  over `demo-headline` → strip_html → output.
+- `demo-headline.json`: the sub-pipe the loop above calls. Opened on its own
+  it has no parameters, so it yields one empty headline.
 
-## Tests (`test/run-tests.js`)
+## Tests
 
-Dependency-free (tiny `assert`-based harness, prints `ok/FAIL name`, exits 1 on
-any failure, summary line at the end). No network: engine tests inject a fake
-`fetcher` returning canned RSS/JSON strings. Must cover at least:
-parseFeed on RSS 2.0 / Atom / RDF samples (incl. CDATA + entities + dc:creator),
-buildRSS escaping, getPath-style access via modules, every operator module's
-happy path, filter ops incl. numeric greater_than and regex, sort date desc,
-template substitution with defaults and runtime params, union port order,
-cycle detection error, duplicate-input-wire error, unknown-type error,
-module-error-continues-downstream (bad regex), fetch_json path extraction,
-item_builder dotted names, and a full end-to-end run of the demo-tech-filter
-shape returning the expected filtered/sorted/truncated items.
+All three suites are dependency-free and need no network. Each is a plain
+`for` loop over a tiny `assert`-based harness that prints `ok/FAIL name`, a
+summary line, and exits 1 on any failure — which means anything left listening
+turns a green run into a hang, so every server, browser and fake issuer they
+start has to be closed.
+
+`npm test` runs the first two:
+
+- **`test/run-tests.js`** — units. Engine tests inject a fake `fetcher`
+  returning canned RSS/JSON strings. Covers at least: parseFeed on RSS 2.0 /
+  Atom / RDF samples (incl. CDATA + entities + dc:creator), buildRSS escaping,
+  getPath-style access via modules, every operator module's happy path, filter
+  ops incl. numeric greater_than and regex, sort date desc, template
+  substitution with defaults and runtime params, union port order, cycle
+  detection error, duplicate-input-wire error, unknown-type error,
+  module-error-continues-downstream (bad regex), fetch_json path extraction,
+  item_builder dotted names, and a full end-to-end run of the demo-tech-filter
+  shape returning the expected filtered/sorted/truncated items. Then the store
+  (`:memory:`, with `assets/demo/pipes` as system pipes): the save/list/get/
+  delete round trip, list order, a foreign owner seeing nothing, system pipes
+  refusing writes, the id scheme, session expiry, and `validatePipeBody`. Then
+  `lib/auth.js`: cookies, `safeReturnTo`, the allowlist, PKCE, and the whole
+  id_token rejection table against a generated RSA key.
+- **`test/server-tests.js`** — HTTP. Spawns `server.js` per environment with
+  `OPENPIPES_DB=:memory:` on its own port and talks to it: the open default,
+  port selection, Basic auth, read-only mode, the feed cache, system pipes,
+  `OPENPIPES_BASE_URL`, and the whole Google-mode surface (gate, round trip,
+  callback failures, isolation between two users, Loop scoping, logout, CSRF,
+  the allowlist, `Secure` cookies, boot refusals) against `test/fake-issuer.mjs`.
+  That issuer is started once at module level and closed after the loop.
+
+`npm run test:e2e` runs **`test/e2e/`**: a headless Chromium driven over the
+DevTools Protocol by `driver.mjs` (hence Node >= 22 for the global
+`WebSocket`; `CHROME_BIN` picks the browser). It starts two servers — one with
+no login, one in Google mode against the fake issuer — and drives the real
+editor: placing, wiring, running, undo/redo, zoom, minimap, auto layout, JSON
+import/export, saving and deleting, and the login gate. `E2E_ONLY=<substring>`
+narrows a run to the suites whose name contains it, which is how you work on
+one without paying for all of them. Assertions go against the DOM, never
+screenshots: headless Chromium in CI has no CJK fonts.
+
+CI (`.github/workflows/test.yml`) runs `npm test` and `node --check
+public/editor.js` on Node 22 and 24, and the browser suite on 24, for every
+push to `main` and every pull request.
