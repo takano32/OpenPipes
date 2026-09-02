@@ -541,6 +541,12 @@ function showGate() {
   // location, so a deep link survives the round trip through Google
   login.href = '/auth/google/login?return_to=' +
     encodeURIComponent(location.pathname + location.search);
+  // The gate covers everything, including the load menu the JSON export lives
+  // in. When it goes up because a session expired mid-edit, that would make an
+  // unsaved graph unreachable, so the rescue is offered on the gate itself.
+  const rescue = $('#btn-gate-export');
+  rescue.hidden = state.modules.length === 0;
+  rescue.onclick = exportPipe; // assigned, not added: showGate can run twice
   $('#login-gate').hidden = false;
   $('#user-menu').hidden = true;
 }

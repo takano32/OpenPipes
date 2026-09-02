@@ -866,6 +866,16 @@ body.wiring .port[data-dir="in"] { pointer-events: auto; }
   text-decoration: none;
 }
 
+/* Offered only when the gate interrupted an edit, so unsaved work has a way
+   out that does not need a session. */
+#btn-gate-export {
+  display: block;
+  margin: 12px auto 0;
+  font-size: 12px;
+}
+
+#btn-gate-export[hidden] { display: none; }
+
 #user-menu {
   display: flex;
   align-items: center;

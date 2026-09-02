@@ -456,8 +456,20 @@ const LOGIN_MESSAGES = {
   unreachable: 'Google に接続できませんでした。',
 };
 
+// A header value has to be ASCII, but `return_to` arrives decoded from the
+// query string, so `/あ` reaches here as a real U+3042 and writeHead would
+// throw — by which point the session cookie has already been set, turning a
+// finished login into a 500. Percent-encode everything outside printable
+// ASCII, going through Buffer so a lone surrogate cannot throw either. `%`
+// is left alone, so an already-encoded URL passes through unchanged.
+function headerSafeUrl(url) {
+  return String(url).replace(/[^\x21-\x7e]+/g, (run) =>
+    Buffer.from(run, 'utf8').reduce(
+      (out, byte) => out + '%' + byte.toString(16).toUpperCase().padStart(2, '0'), ''));
+}
+
 function redirectTo(res, location) {
-  res.writeHead(302, { Location: location });
+  res.writeHead(302, { Location: headerSafeUrl(location) });
   res.end();
 }
 

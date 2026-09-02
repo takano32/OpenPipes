@@ -677,6 +677,8 @@ export const suites = [
     `!document.querySelector('#login-gate').hidden`));
   check('and nothing was loaded behind it',
     await page.eval(`document.querySelectorAll('.pal-item').length`) === 0);
+  check('with an empty canvas the gate offers nothing to rescue',
+    await page.eval(`document.querySelector('#btn-gate-export').hidden`));
   check('the login link keeps the deep link',
     (await page.eval(`document.querySelector('#btn-login').getAttribute('href')`))
       .startsWith('/auth/google/login?return_to='));
@@ -725,6 +727,18 @@ export const suites = [
     `!document.querySelector('#login-gate').hidden`, { timeoutMs: 20000 }));
   check('and the API stops answering',
     await page.eval(`fetch('/api/pipes').then(r => r.status)`) === 401);
+
+  // A session that dies while you are editing must not trap the unsaved graph
+  // behind the gate: the gate covers the load menu the JSON export lives in.
+  await page.eval(`document.querySelector('#btn-login').click()`);
+  check('signing back in works', await editorReady());
+  await page.dropModule('item_builder', 500, 150);
+  await page.eval(`fetch('/auth/logout', { method: 'POST' }).then(r => r.status)`);
+  await page.eval(`document.querySelector('#btn-save').click()`);
+  check('a session that expires mid-edit brings the gate back', await page.until(
+    `!document.querySelector('#login-gate').hidden`));
+  check('and the unsaved graph can still be written out',
+    await page.eval(`!document.querySelector('#btn-gate-export').hidden`));
 }],
 
 ]

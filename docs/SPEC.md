@@ -586,6 +586,14 @@ a session created, `openpipes_session` set, `openpipes_oauth` cleared, `login
 `POST /auth/logout` deletes the session row, clears the cookie and answers 204.
 POST rather than GET so an `<img src>` on another site cannot log people out.
 
+Every `Location` this server writes is percent-encoded first (anything outside
+printable ASCII, through a UTF-8 `Buffer` so a lone surrogate cannot throw;
+`%` is left alone, so an already-encoded URL is unchanged). `return_to`
+arrives **decoded** from the query string, so `/あ` reaches the handler as a
+real U+3042, and a raw header value would make `writeHead` throw — after the
+session had been created and its cookie set, turning a finished login into a
+500.
+
 **Cookies.** `openpipes_session` carries the raw 32-byte token, base64url,
 with `Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000` (30 days, absolute, not
 sliding) plus `Secure` iff `OPENPIPES_BASE_URL` is https. Lax rather than
@@ -824,7 +832,10 @@ and whether that pipe is read-only):
   `encodeURIComponent(location.pathname + location.search)`, so a deep link
   survives the round trip. The same `showGate()` runs when `api()` sees a 401,
   which is how an expired session is handled — it still throws, so the caller
-  toasts as before.
+  toasts as before. Because the overlay also covers the load menu, and the
+  JSON export lives in it, the card carries `#btn-gate-export` — shown only
+  when there is something on the canvas — so a graph that was being edited
+  when the session died can still be written out without a session.
 - **User menu**, in the top bar after 実行 ▶, shown only in google mode when
   signed in: avatar (`referrerpolicy="no-referrer"`), display name, and
   **ログアウト**, which confirms when there are unsaved changes, POSTs

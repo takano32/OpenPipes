@@ -538,6 +538,33 @@ test('google: a callback that does not add up is an HTML error page', () =>
     assert.match(await denied.text(), /access_denied/);
   }));
 
+test('google: a return_to the header cannot carry is percent-encoded, not a 500', () =>
+  // return_to arrives decoded from the query string, so /あ reaches the
+  // handler as a real U+3042. Writing that into Location throws — and by then
+  // the session cookie has been set, so the whole login would end in a 500.
+  withServer(googleEnv, async ({ origin }) => {
+    issuer.setUser({ sub: 'unicode', email: 'u@example.com', name: 'Unicode' });
+    const start = await fetch(`${origin}/auth/google/login?return_to=%2F%E3%81%82`,
+      { redirect: 'manual' });
+    assert.equal(start.status, 302);
+    const oauth = start.headers.getSetCookie()
+      .find((c) => c.startsWith('openpipes_oauth=')).split(';')[0];
+    const bounced = await fetch(start.headers.get('location'), { redirect: 'manual' });
+    const done = await fetch(bounced.headers.get('location'),
+      { redirect: 'manual', headers: { cookie: oauth } });
+
+    assert.equal(done.status, 302, await done.text());
+    assert.equal(done.headers.get('location'), `${origin}/%E3%81%82`);
+    const session = done.headers.getSetCookie().find((c) => c.startsWith('openpipes_session='));
+    assert.ok(session, 'the login itself must still finish');
+
+    // and the same on the already-signed-in shortcut through the login route
+    const again = await fetch(`${origin}/auth/google/login?return_to=%2F%E3%81%82`,
+      { redirect: 'manual', headers: { cookie: session.split(';')[0] } });
+    assert.equal(again.status, 302);
+    assert.equal(again.headers.get('location'), `${origin}/%E3%81%82`);
+  }));
+
 test('google: the login routes do not exist in the other modes', () =>
   withServer({}, async ({ origin }) => {
     assert.equal((await fetch(`${origin}/auth/google/login`, { redirect: 'manual' })).status, 404);
