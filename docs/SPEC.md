@@ -679,12 +679,16 @@ Single-page editor, Yahoo Pipes style: **vertical dataflow, top → bottom**
 (input ports on the top edge of a module card, output ports on the bottom edge).
 
 Layout: top bar (logo "OpenPipes", pipe-name input, buttons **New / Load ▾ /
-Save / Run ▶**) · left palette (modules grouped by category, drag onto canvas)
+Save / Run ▶**, then the user menu in google mode) · left palette (modules grouped by category, drag onto canvas)
 · center canvas (large scrollable area, dotted grid, SVG layer for wires under
 absolutely-positioned module cards) · bottom **debugger panel** (fixed ~230px,
 collapsible) showing the selected module's last output.
 
-Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
+`state.config` comes from `/api/config` and defaults to
+`{ readOnly: false, auth: 'none', user: null }`.
+
+Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe
+and whether that pipe is read-only):
 
 - Palette items are HTML5-draggable; drop on canvas creates a module instance
   with the catalog defaults (deep-cloned) at the drop point.
@@ -725,12 +729,21 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
   the debugger refreshes for the selected (or output) module.
 - **Save**: POST `/api/pipes` (keeps id after first save; server assigns one
   when absent). **Load ▾**: dropdown fetched from GET `/api/pipes`; picking
-  one loads it. Each row also carries **⧉ duplicate** and **✕
-  delete** (both hidden in read-only mode); duplicate saves a copy named
-  "<name> のコピー" through the API without disturbing the canvas. Loading sanitizes the file first (drop non-object or
+  one loads it. Own pipes come first, then a 「デモ」 divider row and the
+  read-only built-ins. Each row also carries **⧉ duplicate** and **✕
+  delete** (both hidden in read-only mode; a read-only row never gets the ✕,
+  because the server would refuse it anyway); duplicate saves a copy named
+  "<name> のコピー" through the API without disturbing the canvas. The filter
+  box (shown above six rows) skips the divider — it has no `data-name` — and
+  hides it when every row under it is hidden. Loading sanitizes the file first (drop non-object or
   duplicate-id modules, wires whose endpoints don't exist, malformed
   list/rules rows) so a hand-edited file can't leave the canvas broken. Also offers "Open RSS" link to `/pipes/<id>/run` once saved.
   **New**: confirm() when there are unsaved changes.
+- **Save as a copy.** Loading a pipe records whether it is read-only, and
+  `savePipe()` then omits `body.id`, so saving a demo creates a copy of your
+  own and toasts 「コピーとして保存しました」 rather than 「保存しました」.
+  New / import / delete clear the flag. The server's 403 remains the
+  guarantee; this only avoids a pointless round trip.
 - Canvas panning via scrollbars (the canvas inner area is 4000×3000). Module
   drag updates wires live.
 - **Auto layout** (⇵ in the top bar, `Ctrl`/`Cmd`+`Shift`+`L`): places every
@@ -784,6 +797,22 @@ Behaviors (state mirrors the pipe JSON exactly, plus `id` of the saved pipe):
 - Input ports have `pointer-events: none` except while a wire drag is active
   (`body.wiring`), so their enlarged hit halos never steal clicks/drags aimed
   at the card header they sit on.
+- **Login gate** (google mode only). `init()` reads `/api/config` first; when
+  `auth === 'google'` and `user` is null it calls `showGate()` and returns —
+  no catalog fetch, no bindings, an empty palette behind the overlay.
+  `#login-gate` is a full-viewport fixed overlay above the top bar with a
+  centred card: the logo, the text
+  「このサーバーを使うには Google アカウントでログインしてください。」 and
+  `<a id="btn-login" class="btn primary">Google でログイン</a>` whose `href`
+  the script sets to `/auth/google/login?return_to=` +
+  `encodeURIComponent(location.pathname + location.search)`, so a deep link
+  survives the round trip. The same `showGate()` runs when `api()` sees a 401,
+  which is how an expired session is handled — it still throws, so the caller
+  toasts as before.
+- **User menu**, in the top bar after 実行 ▶, shown only in google mode when
+  signed in: avatar (`referrerpolicy="no-referrer"`), display name, and
+  **ログアウト**, which confirms when there are unsaved changes, POSTs
+  `/auth/logout` and reloads.
 
 Look: light, clean, Yahoo-Pipes-inspired. Category header colors —
 Sources `#2f80ed`, User Inputs `#9b51e0`, Operators `#f2994a`, Output `#27ae60`.

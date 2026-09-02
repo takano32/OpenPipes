@@ -1,5 +1,8 @@
 // Browser test suites. Each is an async function receiving a context of
-// { page, origin, check } and driving the real editor.
+// { page, origin, googleOrigin, check } and driving the real editor. All but
+// the login suite run against `origin`, an instance with no login at all.
+
+import { sleep } from './driver.mjs';
 
 export const suites = [
 
@@ -654,6 +657,74 @@ export const suites = [
   check('the deleted pipe is no longer the open document',
     await page.eval(`document.querySelector('#open-rss').hidden`));
   check('the demo pipes are untouched', after.includes('demo-tech-filter') && after.includes('demo-merged'), after);
+}],
+
+/* -------------------------------------------------------------- google login */
+// Runs against the second server, the one in Google mode, and walks the whole
+// thing: gate, login through the fake provider, the demos, save-as-copy, out.
+['google login', async ({ page, googleOrigin, check }) => {
+  // not page.goto: that waits for a palette, and behind the gate there is none
+  const navigate = async (url) => {
+    await page.send('Page.navigate', { url });
+    await page.until(`document.readyState === 'complete'`, { timeoutMs: 20000 });
+    await sleep(200);
+  };
+  const editorReady = () =>
+    page.until(`document.querySelectorAll('.pal-item').length > 0`, { timeoutMs: 20000 });
+
+  await navigate(googleOrigin + '/');
+  check('the gate covers the editor', await page.until(
+    `!document.querySelector('#login-gate').hidden`));
+  check('and nothing was loaded behind it',
+    await page.eval(`document.querySelectorAll('.pal-item').length`) === 0);
+  check('the login link keeps the deep link',
+    (await page.eval(`document.querySelector('#btn-login').getAttribute('href')`))
+      .startsWith('/auth/google/login?return_to='));
+
+  await page.eval(`document.querySelector('#btn-login').click()`);
+  check('logging in lands back in a working editor', await editorReady());
+  check('the user menu shows who is signed in',
+    await page.eval(`!document.querySelector('#user-menu').hidden
+      && document.querySelector('#user-name').textContent`) === 'Fake User A');
+  check('the gate is gone', await page.eval(`document.querySelector('#login-gate').hidden`));
+
+  await page.eval(`document.querySelector('#btn-load').click()`);
+  await page.until(`document.querySelectorAll('#load-menu .menu-item').length > 0`);
+  const menu = await page.eval(`(() => {
+    const rows = [...document.querySelectorAll('#load-menu .menu-item')];
+    const demo = rows.find((r) => r.dataset.name === 'デモ: フィードのマージ');
+    return {
+      divider: document.querySelector('#load-menu .menu-divider')?.textContent,
+      dup: !!demo.querySelector('.menu-act'),
+      del: !!demo.querySelector('.menu-del'),
+    };
+  })()`);
+  check('the demos sit under a デモ heading', menu.divider === 'デモ', menu);
+  check('a demo can be duplicated but not deleted', menu.dup && !menu.del, menu);
+  await page.eval(`document.querySelector('#btn-load').click()`);
+
+  // saving a pipe of your own
+  await page.dropModule('item_builder', 500, 150);
+  await page.eval(`(() => { const n = document.querySelector('#pipe-name');
+    n.value = 'e2e-google'; n.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+  await page.eval(`document.querySelector('#btn-save').click()`);
+  check('saving works when signed in', await page.until(
+    `fetch('/api/pipes').then(r => r.json()).then(l => l.some(p => p.name === 'e2e-google'))`));
+
+  // saving a demo saves a copy instead of failing
+  await page.goto(`${googleOrigin}/?pipe=demo-merged`);
+  await page.eval(`document.querySelector('#btn-save').click()`);
+  check('saving a demo saves a copy', await page.until(
+    `[...document.querySelectorAll('.toast')].some(t => t.textContent === 'コピーとして保存しました')`));
+  const copyId = await page.eval(
+    `document.querySelector('#open-rss').getAttribute('href').split('/')[2]`);
+  check('the copy has an id of its own', copyId && copyId !== 'demo-merged', copyId);
+
+  await page.eval(`window.confirm = () => true; document.querySelector('#btn-logout').click()`);
+  check('logging out brings the gate back', await page.until(
+    `!document.querySelector('#login-gate').hidden`, { timeoutMs: 20000 }));
+  check('and the API stops answering',
+    await page.eval(`fetch('/api/pipes').then(r => r.status)`) === 401);
 }],
 
 ]

@@ -11,6 +11,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromeCandidates, connect, sleep, waitFor } from './driver.mjs';
+import { startFakeIssuer } from '../fake-issuer.mjs';
 import { suites } from './suites.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -76,11 +77,27 @@ async function freePort() {
 const only = process.env.E2E_ONLY || '';
 
 const appPort = await freePort();
+const googlePort = await freePort();
 const cdpPort = await freePort();
 const origin = `http://127.0.0.1:${appPort}`;
+// 127.0.0.1 rather than localhost, and byte for byte the base URL the second
+// server is given: the session cookie and the Origin check are bound to it.
+const googleOrigin = `http://127.0.0.1:${googlePort}`;
 
 const server = spawnQuiet(process.execPath, [path.join(ROOT, 'server.js')],
   { PORT: String(appPort), OPENPIPES_DB: ':memory:' });
+
+// A second instance in Google mode, against a fake provider in this process,
+// so the gate and the user menu can be exercised without a real Google.
+const issuer = await startFakeIssuer({ clientId: 'test', clientSecret: 'test-secret' });
+const googleServer = spawnQuiet(process.execPath, [path.join(ROOT, 'server.js')], {
+  PORT: String(googlePort),
+  OPENPIPES_DB: ':memory:',
+  OPENPIPES_GOOGLE_CLIENT_ID: 'test',
+  OPENPIPES_GOOGLE_CLIENT_SECRET: 'test-secret',
+  OPENPIPES_BASE_URL: googleOrigin,
+  OPENPIPES_OIDC_ISSUER: issuer.issuer,
+});
 let browser = null;
 let page = null;
 let failures = 0;
@@ -89,13 +106,17 @@ let passed = 0;
 const cleanup = async () => {
   try { page?.close(); } catch { /* already gone */ }
   server.child.kill('SIGKILL');
+  googleServer.child.kill('SIGKILL');
   browser?.child.kill('SIGKILL');
+  await issuer.close(); // an open listener would keep this process alive
 };
 
 try {
   await waitFor('the OpenPipes server', async () => (await fetch(`${origin}/api/modules`)).ok);
+  await waitFor('the Google-mode server',
+    async () => (await fetch(`${googleOrigin}/api/config`)).ok);
   browser = await startBrowser(cdpPort);
-  console.log(`browser: ${browser.bin}   app: ${origin}\n`);
+  console.log(`browser: ${browser.bin}   app: ${origin}   google: ${googleOrigin}\n`);
 
   for (const [name, run] of suites) {
     // A whole run takes minutes and loads the machine; E2E_ONLY=<substring>
@@ -110,7 +131,7 @@ try {
     };
     console.log(name);
     try {
-      await run({ page, origin, check });
+      await run({ page, origin, googleOrigin, check });
       check('no page errors', page.pageErrors.length === 0, page.pageErrors.slice(0, 3));
     } catch (err) {
       failures += 1;
@@ -125,7 +146,7 @@ try {
 } catch (err) {
   failures += 1;
   console.error('e2e setup failed:', err.message);
-  const log = server.log.join('').trim();
+  const log = (server.log.join('') + googleServer.log.join('')).trim();
   if (log) console.error('server output:\n' + log.split('\n').slice(-8).join('\n'));
 } finally {
   await cleanup();

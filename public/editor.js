@@ -13,6 +13,7 @@ const state = {
   modules: [],
   wires: [],
   savedId: null,
+  savedReadOnly: false, // the open pipe is a built-in demo: saving copies it
   dirty: false,
   counter: 1,          // seeds m<N>/w<N> ids; re-seeded past loaded ids
   catalog: [],
@@ -23,7 +24,7 @@ const state = {
   runParams: {},       // user-input values, kept across runs
   dbgJson: false,
   dbgCollapsed: false,
-  config: { readOnly: false },
+  config: { readOnly: false, auth: 'none', user: null },
 };
 
 /*
@@ -446,6 +447,9 @@ async function api(path, options) {
   const res = await fetch(path, options);
   let body = null;
   try { body = await res.json(); } catch { /* non-JSON body */ }
+  // A session that expired while the editor was open: put the gate back, and
+  // still throw so the caller toasts as it always did.
+  if (res.status === 401 && state.config.auth === 'google') showGate();
   if (!res.ok) throw new Error((body && body.error) || ('HTTP ' + res.status));
   return body;
 }
@@ -489,6 +493,15 @@ async function init() {
   try {
     state.config = await api('/api/config');
   } catch { /* an older server: assume everything is allowed */ }
+
+  // Nothing to edit until there is somebody to edit as: no catalog fetch, no
+  // bindings, an empty palette behind the gate.
+  if (state.config.auth === 'google' && !state.config.user) {
+    showGate();
+    return;
+  }
+  renderUserMenu();
+
   if (state.config.readOnly) {
     const save = $('#btn-save');
     save.disabled = true;
@@ -519,6 +532,41 @@ async function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+/* ---------- login gate ---------- */
+
+// Shared by both ways in: the gate at startup, and a 401 from any later call.
+function showGate() {
+  const login = $('#btn-login');
+  // location, so a deep link survives the round trip through Google
+  login.href = '/auth/google/login?return_to=' +
+    encodeURIComponent(location.pathname + location.search);
+  $('#login-gate').hidden = false;
+  $('#user-menu').hidden = true;
+}
+
+function renderUserMenu() {
+  const user = state.config.auth === 'google' ? state.config.user : null;
+  const menu = $('#user-menu');
+  if (!user) {
+    menu.hidden = true;
+    return;
+  }
+  const avatar = $('#user-avatar');
+  if (user.picture) avatar.src = user.picture;
+  else avatar.removeAttribute('src');
+  $('#user-name').textContent = user.name || user.email || '';
+  $('#btn-logout').addEventListener('click', logout);
+  menu.hidden = false;
+}
+
+async function logout() {
+  if (state.dirty && !confirm('未保存の変更があります。破棄してログアウトしますか？')) return;
+  try {
+    await fetch('/auth/logout', { method: 'POST' });
+  } catch { /* the reload shows the gate either way */ }
+  location.reload();
+}
 
 /* ---------- palette ---------- */
 
@@ -1453,17 +1501,21 @@ async function runPipe() {
 async function savePipe() {
   try {
     const body = { name: state.name, modules: state.modules, wires: state.wires };
-    if (state.savedId) body.id = state.savedId;
+    // A demo cannot be saved over — the server answers 403 — so leaving the id
+    // out turns the save into a copy that belongs to whoever is signed in.
+    const asCopy = Boolean(state.savedId && state.savedReadOnly);
+    if (state.savedId && !state.savedReadOnly) body.id = state.savedId;
     // what the request actually carries — an edit made while it is in flight
     // must not be counted as saved
     const sentRev = history.stack[history.index].rev;
     history.lastKey = null; // typing on either side of a save is not one step
     const res = await postJSON('/api/pipes', body);
     state.savedId = res.id;
+    state.savedReadOnly = false;
     history.savedRev = sentRev;
     syncHistoryUI();
     updateOpenRss();
-    toast('保存しました');
+    toast(asCopy ? 'コピーとして保存しました' : '保存しました');
   } catch (err) {
     toast('保存エラー: ' + err.message, 'error');
   }
@@ -1482,6 +1534,7 @@ function newPipe() {
   state.modules = [];
   state.wires = [];
   state.savedId = null;
+  state.savedReadOnly = false;
   state.counter = 1;
   state.selected.clear();
   state.selectedWire = null;
@@ -1508,13 +1561,19 @@ async function toggleLoadMenu() {
       return;
     }
     const rows = el('div', { class: 'menu-rows' });
+    // The built-in demos come last and get their own heading. It is not a
+    // pipe row, so it carries no data-name and the filter skips it.
+    let divider = null;
+    const demoRows = [];
     if (list.length > 6) {
       const search = el('input', { class: 'menu-search', type: 'search', placeholder: '絞り込み' });
       search.addEventListener('input', () => {
         const q = search.value.trim().toLowerCase();
         for (const row of rows.children) {
+          if (!row.dataset.name) continue; // the デモ divider
           row.hidden = q !== '' && !row.dataset.name.toLowerCase().includes(q);
         }
+        if (divider) divider.hidden = !demoRows.some((row) => !row.hidden);
       });
       dom.loadMenu.append(search);
       setTimeout(() => search.focus(), 0);
@@ -1522,6 +1581,10 @@ async function toggleLoadMenu() {
     dom.loadMenu.append(rows);
     for (const p of list) {
       const label = p.name || p.id;
+      if (p.readOnly && !divider) {
+        divider = el('div', { class: 'menu-divider', text: 'デモ' });
+        rows.append(divider);
+      }
       let dup = null;
       let del = null;
       if (!state.config.readOnly) {
@@ -1533,14 +1596,17 @@ async function toggleLoadMenu() {
           e.stopPropagation();
           duplicatePipe(p.id, label);
         });
-        del = el('button', {
-          class: 'menu-act menu-del', type: 'button', text: '×',
-          title: `「${label}」を削除`, 'aria-label': `${label} を削除`,
-        });
-        del.addEventListener('click', (e) => {
-          e.stopPropagation(); // the row itself loads the pipe
-          deletePipe(p.id, label);
-        });
+        // a demo belongs to nobody and cannot be deleted, so no ✕ on it
+        if (!p.readOnly) {
+          del = el('button', {
+            class: 'menu-act menu-del', type: 'button', text: '×',
+            title: `「${label}」を削除`, 'aria-label': `${label} を削除`,
+          });
+          del.addEventListener('click', (e) => {
+            e.stopPropagation(); // the row itself loads the pipe
+            deletePipe(p.id, label);
+          });
+        }
       }
       const row = el('div', { class: 'menu-item', 'data-name': label },
         el('span', { class: 'menu-name', text: label }),
@@ -1551,6 +1617,7 @@ async function toggleLoadMenu() {
         loadPipe(p.id);
       });
       rows.append(row);
+      if (p.readOnly) demoRows.push(row);
     }
   } catch (err) {
     dom.loadMenu.textContent = '';
@@ -1612,6 +1679,7 @@ async function importPipe(file) {
     state.wires = clean.wires;
     // an imported file is not yet a saved pipe on this server
     state.savedId = null;
+    state.savedReadOnly = false;
     state.selected.clear();
     state.selectedWire = null;
     state.lastDebug = null;
@@ -1658,6 +1726,7 @@ async function deletePipe(id, label) {
     // is no longer backed by a file, so it counts as unsaved again
     if (state.savedId === id) {
       state.savedId = null;
+      state.savedReadOnly = false;
       history.savedRev = 0; // no revision was ever 0
       updateOpenRss();
       syncHistoryUI();
@@ -1681,6 +1750,7 @@ async function loadPipe(id) {
     state.modules = clean.modules;
     state.wires = clean.wires;
     state.savedId = pipe.id || id;
+    state.savedReadOnly = Boolean(pipe.readOnly);
     state.selected.clear();
     state.selectedWire = null;
     state.lastDebug = null;

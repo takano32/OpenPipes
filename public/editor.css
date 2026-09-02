@@ -818,3 +818,94 @@ body.wiring .port[data-dir="in"] { pointer-events: auto; }
 .toast.error { background: #c0392b; }
 
 .toast.fade { opacity: 0; transform: translateY(6px); }
+
+/* ---------- login gate & user menu ---------- */
+
+/* Above everything, including the top bar, so nothing behind it is reachable
+   while the editor has no session to work with. */
+#login-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+}
+
+#login-gate[hidden] { display: none; }
+
+#login-card {
+  width: min(90vw, 380px);
+  padding: 32px 34px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  text-align: center;
+}
+
+#login-logo {
+  font-size: 20px;
+  font-weight: 800;
+  letter-spacing: 0.2px;
+  color: #1f2a37;
+  margin-bottom: 14px;
+}
+
+#login-logo span { color: var(--accent); }
+
+#login-card p {
+  margin: 0 0 20px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+#login-card .btn {
+  display: inline-block;
+  padding: 9px 18px;
+  text-decoration: none;
+}
+
+#user-menu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+#user-menu[hidden] { display: none; }
+
+#user-avatar {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--bg);
+  object-fit: cover;
+}
+
+#user-avatar:not([src]) { display: none; }
+
+#user-name {
+  max-width: 12em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* The divider between your own pipes and the built-in demos. It carries no
+   data-name, so the filter box skips it and hides it when nothing is left
+   underneath. */
+.menu-divider {
+  padding: 8px 10px 4px;
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+}
+
+.menu-divider[hidden] { display: none; }

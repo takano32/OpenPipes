@@ -25,6 +25,11 @@
   </div>
   <button id="btn-save" class="btn" type="button">保存</button>
   <button id="btn-run" class="btn primary" type="button">実行 ▶</button>
+  <div id="user-menu" hidden>
+    <img id="user-avatar" referrerpolicy="no-referrer" alt="">
+    <span id="user-name"></span>
+    <button id="btn-logout" class="btn" type="button">ログアウト</button>
+  </div>
 </header>
 
 <main id="workspace">
@@ -61,6 +66,14 @@
     </div>
   </section>
 </main>
+
+<div id="login-gate" hidden>
+  <div id="login-card">
+    <div id="login-logo"><span>Open</span>Pipes</div>
+    <p>このサーバーを使うには Google アカウントでログインしてください。</p>
+    <a id="btn-login" class="btn primary">Google でログイン</a>
+  </div>
+</div>
 
 <div id="toasts"></div>
 </body>
