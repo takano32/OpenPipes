@@ -1,7 +1,10 @@
 // OpenPipes test suite — dependency-free, no network (all fetches are canned).
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseFeed, buildRSS, buildJSONFeed, escapeXml } from '../lib/feed.js';
 import { runPipe, catalog, PipeError } from '../lib/engine.js';
+import { openStore, slugify, validatePipeBody } from '../lib/store.js';
 
 // ---------------------------------------------------------------- harness
 
@@ -1099,6 +1102,176 @@ test('fetchURL: aborts a chunked response that passes maxBytes without buffering
     // a socket left open by the aborted read would keep the process alive
     server.closeAllConnections?.();
     await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+// ----------------------------------------------------------------- store
+
+const SYSTEM_PIPES_DIR =
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'demo', 'pipes');
+
+// Every store test gets its own in-memory database with the shipped demos as
+// system pipes, and two users so isolation can actually be observed.
+function withStore(fn) {
+  const store = openStore({ dbPath: ':memory:', systemPipesDir: SYSTEM_PIPES_DIR });
+  try {
+    const a = store.upsertUser({ provider: 'google', subject: 'sub-a', email: 'a@example.com', name: 'A' });
+    const b = store.upsertUser({ provider: 'google', subject: 'sub-b', email: 'b@example.com', name: 'B' });
+    return fn(store, a.id, b.id);
+  } finally {
+    store.close();
+  }
+}
+
+const PIPE = (name) => ({
+  name,
+  modules: [{ id: 'm1', type: 'output', params: {}, x: 0, y: 0 }],
+  wires: [],
+});
+
+test('store: save, list, get and delete round trip', () => withStore((store, a) => {
+  const { id } = store.savePipe(a, PIPE('Round Trip'));
+  assert.match(id, /^[a-z0-9-]+-[0-9a-f]{16}$/);
+
+  const got = store.getPipe(id, a);
+  assert.equal(got.id, id);
+  assert.equal(got.name, 'Round Trip');
+  assert.equal(got.readOnly, false);
+  assert.deepEqual(got.modules, PIPE('x').modules);
+  assert.ok(got.savedAt);
+
+  assert.equal(store.listPipes(a).filter((p) => !p.readOnly).length, 1);
+  store.deletePipe(id, a);
+  assert.equal(store.getPipe(id, a), null);
+  assert.equal(store.listPipes(a).filter((p) => !p.readOnly).length, 0);
+}));
+
+test('store: own pipes come first, newest first, then the demos', () => withStore((store, a) => {
+  const first = store.savePipe(a, PIPE('older')).id;
+  const second = store.savePipe(a, PIPE('newer')).id;
+  // savedAt is an ISO string with millisecond resolution; make the order certain
+  store.db.prepare('UPDATE pipes SET saved_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', first);
+  const list = store.listPipes(a);
+  assert.deepEqual(list.slice(0, 2).map((p) => p.id), [second, first]);
+  assert.deepEqual(list.slice(0, 2).map((p) => p.readOnly), [false, false]);
+  assert.ok(list.slice(2).every((p) => p.readOnly), 'the rest are the demos');
+  assert.ok(list.some((p) => p.id === 'demo-merged'));
+}));
+
+test('store: another owner sees nothing of yours', () => withStore((store, a, b) => {
+  const { id } = store.savePipe(a, PIPE('private'));
+  assert.equal(store.listPipes(b).some((p) => p.id === id), false);
+  assert.equal(store.getPipe(id, b), null);
+  store.deletePipe(id, b);                       // a no-op, not an error
+  assert.ok(store.getPipe(id, a), 'the delete must not have crossed owners');
+  assert.throws(() => store.savePipe(b, { id, ...PIPE('stolen') }), /Pipe not found/);
+  assert.equal(store.getPipe(id, a).name, 'private');
+}));
+
+test('store: a published pipe is readable by id whoever asks', () => withStore((store, a) => {
+  const { id } = store.savePipe(a, PIPE('published'));
+  const found = store.publishedPipe(id);
+  assert.equal(found.ownerId, a);
+  assert.equal(found.pipe.name, 'published');
+  assert.equal(store.publishedPipe('demo-merged').ownerId, null);
+  assert.equal(store.publishedPipe('never-saved'), null);
+}));
+
+test('store: system pipes are readable by everyone and writable by nobody', () => withStore((store, a, b) => {
+  for (const owner of [a, b, null]) {
+    const demo = store.getPipe('demo-merged', owner);
+    assert.equal(demo.readOnly, true);
+    assert.ok(demo.modules.length > 0);
+  }
+  assert.equal(store.getPipe('never-saved', null), null);
+  assert.throws(() => store.savePipe(a, { id: 'demo-merged', ...PIPE('x') }), { status: 403 });
+  assert.throws(() => store.deletePipe('demo-merged', a), { status: 403 });
+  // ...but duplicating one is just a save with no id
+  const copy = store.savePipe(a, PIPE('デモのコピー'));
+  assert.notEqual(copy.id, 'demo-merged');
+  assert.equal(store.getPipe(copy.id, a).readOnly, false);
+  assert.equal(store.getPipe(copy.id, b), null);
+}));
+
+test('store: ids are a capped slug plus 64 random bits', () => withStore((store, a) => {
+  assert.equal(slugify('Hello, World!'), 'hello-world');
+  assert.equal(slugify('日本語だけ'), 'pipe');
+  assert.equal(slugify('x'.repeat(80)).length, 40);
+  assert.equal(slugify('----'), 'pipe');
+
+  const long = store.savePipe(a, PIPE('y'.repeat(80))).id;
+  assert.equal(long, 'y'.repeat(40) + long.slice(40));
+  assert.match(long, /^[a-z0-9-]+-[0-9a-f]{16}$/);
+  assert.ok(long.length <= 64);
+
+  const seen = new Set();
+  for (let i = 0; i < 20; i++) seen.add(store.savePipe(a, PIPE('same name')).id);
+  assert.equal(seen.size, 20, 'ids must not collide');
+}));
+
+test('store: an invalid pipe id is refused before any lookup', () => withStore((store, a) => {
+  for (const bad of ['UPPER', 'has space', '../etc', '', 'x'.repeat(65), 7, null]) {
+    assert.throws(() => store.getPipe(bad, a), { status: 400 }, String(bad));
+  }
+  assert.throws(() => store.deletePipe('Bad Id', a), { status: 400 });
+  assert.throws(() => store.publishedPipe('Bad Id'), { status: 400 });
+}));
+
+test('store: sessions are looked up by hash and expire', () => withStore((store, a) => {
+  const token = store.createSession(a, 60_000);
+  assert.equal(store.sessionUser(token).id, a);
+  assert.equal(store.sessionUser(token + 'x'), null);
+  assert.equal(store.sessionUser(''), null);
+  // the raw token is never stored
+  assert.equal(store.db.prepare('SELECT id_hash FROM sessions').get().id_hash === token, false);
+
+  store.deleteSession(token);
+  assert.equal(store.sessionUser(token), null);
+
+  const expired = store.createSession(a, -1000);
+  assert.equal(store.sessionUser(expired), null);
+  store.purgeExpiredSessions();
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM sessions').get().n, 0);
+}));
+
+test('store: a user is keyed on (provider, subject), display data refreshed', () => withStore((store) => {
+  const first = store.upsertUser({ provider: 'google', subject: 's', email: 'old@x', name: 'Old' });
+  const again = store.upsertUser({ provider: 'google', subject: 's', email: 'new@x', name: 'New', picture: 'p' });
+  assert.equal(again.id, first.id, 'the same subject is the same user');
+  assert.equal(again.email, 'new@x');
+  assert.equal(again.picture, 'p');
+  assert.equal(again.created_at, first.created_at);
+  assert.match(first.id, /^u-[0-9a-f]{16}$/);
+  assert.equal(store.ensureLocalUser(), 'local');
+  assert.equal(store.ensureLocalUser(), 'local', 'creating it twice is fine');
+}));
+
+test('store: deleting a user takes their pipes and sessions with them', () => withStore((store, a) => {
+  const { id } = store.savePipe(a, PIPE('doomed'));
+  store.createSession(a, 60_000);
+  store.db.prepare('DELETE FROM users WHERE id = ?').run(a);
+  assert.equal(store.publishedPipe(id), null);
+  assert.equal(store.db.prepare('SELECT count(*) AS n FROM sessions').get().n, 0);
+}));
+
+test('store: validatePipeBody rejects what a save used to reject', () => {
+  const ok = { name: 'fine', modules: [{ id: 'm1', type: 'output' }], wires: [] };
+  assert.equal(validatePipeBody(ok), ok);
+  const bad = [
+    null, 'string', [],
+    { name: 1, modules: [], wires: [] },
+    { name: 'x', modules: {}, wires: [] },
+    { name: 'x', modules: [], wires: {} },
+    { name: 'x', modules: [null], wires: [] },
+    { name: 'x', modules: [{ id: '', type: 'output' }], wires: [] },
+    { name: 'x', modules: [{ id: 'm1' }], wires: [] },
+    { name: 'x', modules: [{ id: 'm1', type: 'output' }, { id: 'm1', type: 'output' }], wires: [] },
+    { name: 'x', modules: [{ id: 'm1', type: 'output', params: [] }], wires: [] },
+    { name: 'x', modules: [], wires: [{ from: {} }] },
+    { name: 'x', modules: [], wires: ['nope'] },
+  ];
+  for (const body of bad) {
+    assert.throws(() => validatePipeBody(body), { status: 400 }, JSON.stringify(body));
   }
 });
 

@@ -9,6 +9,6 @@
     "test:e2e": "node test/e2e/run.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   }
 }

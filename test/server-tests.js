@@ -3,8 +3,6 @@
 // we just started. Run by `npm test` after the unit suite.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, cp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,16 +15,16 @@ function test(name, fn) {
 
 let nextPort = 24000 + (process.pid % 1000) * 10;
 
-// Starts an instance with its own throwaway data directory, seeded with the
-// demo pipes so the fixtures are the ones the app ships. `env` may be a
-// function of the chosen port, for tests about how the port itself is picked.
+// Starts an instance on its own port against an in-memory database, so runs
+// never touch each other or the repository. The demo pipes are read from
+// assets/demo/pipes/ by the server itself, so every instance has them.
+// `env` may be a function of the chosen port, for tests about the port itself
+// and for anything that has to know its own origin up front.
 async function withServer(env, body) {
-  const dataDir = await mkdtemp(path.join(tmpdir(), 'openpipes-http-'));
-  await cp(path.join(ROOT, 'data', 'pipes'), dataDir, { recursive: true });
   const port = nextPort++;
   const extra = typeof env === 'function' ? env(port) : env;
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, PORT: String(port), OPENPIPES_DATA: dataDir, ...extra },
+    env: { ...process.env, PORT: String(port), OPENPIPES_DB: ':memory:', ...extra },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const log = [];
@@ -47,8 +45,23 @@ async function withServer(env, body) {
     return await body({ origin, log });
   } finally {
     child.kill('SIGKILL');
-    await rm(dataDir, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+// A misconfigured instance must refuse to start and say which variable is
+// wrong, instead of coming up and failing later in the middle of a login.
+async function expectBootFailure(env, pattern) {
+  const port = nextPort++;
+  const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
+    env: { ...process.env, PORT: String(port), OPENPIPES_DB: ':memory:', ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const log = [];
+  child.stdout.on('data', (d) => log.push(String(d)));
+  child.stderr.on('data', (d) => log.push(String(d)));
+  const code = await new Promise((resolve) => child.on('exit', resolve));
+  assert.equal(code, 1, 'the server should have refused to start; output: ' + log.join(''));
+  assert.match(log.join(''), pattern);
 }
 
 const basic = (user, pass) =>
@@ -163,10 +176,12 @@ test('read-only: saving and deleting are refused, reading is not', () =>
     assert.equal(config.readOnly, true);
   }));
 
-test('read-only: the demo pipe really is still on disk afterwards', () =>
+test('read-only: the demo pipe really is still listed afterwards', () =>
   withServer({ OPENPIPES_READONLY: '1' }, async ({ origin }) => {
     await fetch(`${origin}/api/pipes/demo-merged`, { method: 'DELETE' });
     assert.equal((await fetch(`${origin}/api/pipes/demo-merged`)).status, 200);
+    const list = await (await fetch(`${origin}/api/pipes`)).json();
+    assert.ok(list.some((p) => p.id === 'demo-merged'));
   }));
 
 test('read-only and a password combine', () =>
@@ -232,17 +247,26 @@ test('cache: Cache-Control: no-cache recomputes', () =>
 
 test('cache: saving the pipe invalidates what was cached for it', () =>
   withServer({}, async ({ origin }) => {
-    const before = await (await feed(origin)).text();
-    assert.equal((await feed(origin)).headers.get('x-openpipes-cache'), 'hit');
+    // the demo itself is read-only, so this works on a copy of it
+    const demo = await (await fetch(`${origin}/api/pipes/demo-tech-filter`)).json();
+    const copy = await (await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: asJSON,
+      body: JSON.stringify({ name: 'cache copy', modules: demo.modules, wires: demo.wires }),
+    })).json();
+    const own = (q = '') => fetch(`${origin}/pipes/${copy.id}/run${q}`);
 
-    const pipe = await (await fetch(`${origin}/api/pipes/demo-tech-filter`)).json();
-    pipe.name = 'renamed by the cache test';
+    const before = await (await own()).text();
+    assert.equal((await own()).headers.get('x-openpipes-cache'), 'hit');
+
     const save = await fetch(`${origin}/api/pipes`, {
-      method: 'POST', headers: asJSON, body: JSON.stringify(pipe),
+      method: 'POST', headers: asJSON,
+      body: JSON.stringify({
+        id: copy.id, name: 'renamed by the cache test', modules: demo.modules, wires: demo.wires,
+      }),
     });
     assert.equal(save.status, 200);
 
-    const after = await feed(origin);
+    const after = await own();
     assert.equal(after.headers.get('x-openpipes-cache'), 'miss');
     const body = await after.text();
     assert.notEqual(body, before);
@@ -267,7 +291,6 @@ test('cache: OPENPIPES_CACHE_TTL=0 turns it off', () =>
 test('cache: a failing run is not cached', () =>
   withServer({}, async ({ origin }) => {
     const broken = {
-      id: 'broken-cache-test',
       name: 'broken',
       modules: [
         { id: 'm1', type: 'fetch_feed', params: { urls: ['http://127.0.0.1:9/nope.xml'] }, x: 0, y: 0 },
@@ -275,9 +298,11 @@ test('cache: a failing run is not cached', () =>
       ],
       wires: [{ id: 'w1', from: { module: 'm1', port: 'out' }, to: { module: 'm2', port: 'in' } }],
     };
-    await fetch(`${origin}/api/pipes`, { method: 'POST', headers: asJSON, body: JSON.stringify(broken) });
+    // an id is assigned by the server: POST only ever updates a pipe you own
+    const { id } = await (await fetch(`${origin}/api/pipes`,
+      { method: 'POST', headers: asJSON, body: JSON.stringify(broken) })).json();
     for (let i = 0; i < 2; i++) {
-      const res = await fetch(`${origin}/pipes/broken-cache-test/run`);
+      const res = await fetch(`${origin}/pipes/${id}/run`);
       assert.equal(res.status, 502);
       assert.equal(res.headers.get('x-openpipes-cache'), null);
     }
@@ -308,6 +333,74 @@ test('jsonfeed: rss, json and jsonfeed are three separate cache entries', () =>
       assert.equal((await feed(origin, q)).headers.get('x-openpipes-cache'), 'hit');
     }
     assert.equal(seen.size, 3, 'each format should hash differently');
+  }));
+
+// ------------------------------------------------------------- system pipes
+
+test('system pipes: the demos are listed read-only and cannot be written', () =>
+  withServer({}, async ({ origin }) => {
+    const list = await (await fetch(`${origin}/api/pipes`)).json();
+    const demo = list.find((p) => p.id === 'demo-merged');
+    assert.ok(demo, 'the shipped demos should be listed');
+    assert.equal(demo.readOnly, true);
+
+    const over = await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: asJSON,
+      body: JSON.stringify({ id: 'demo-merged', name: 'hijacked', modules: [], wires: [] }),
+    });
+    assert.equal(over.status, 403);
+    assert.match((await over.json()).error, /built-in demo/);
+
+    const del = await fetch(`${origin}/api/pipes/demo-merged`, { method: 'DELETE' });
+    assert.equal(del.status, 403);
+    const after = await (await fetch(`${origin}/api/pipes`)).json();
+    assert.ok(after.some((p) => p.id === 'demo-merged'), 'the demo must survive');
+  }));
+
+test('system pipes: a saved pipe of your own is listed as writable', () =>
+  withServer({}, async ({ origin }) => {
+    const { id } = await (await fetch(`${origin}/api/pipes`,
+      { method: 'POST', headers: asJSON, body: NEW_PIPE })).json();
+    const list = await (await fetch(`${origin}/api/pipes`)).json();
+    const mine = list.find((p) => p.id === id);
+    assert.equal(mine.readOnly, false);
+    assert.equal(list.indexOf(mine), 0, 'own pipes come before the demos');
+    assert.equal((await (await fetch(`${origin}/api/pipes/${id}`)).json()).readOnly, false);
+  }));
+
+test('system pipes: a demo whose Loop names another demo still runs', () =>
+  withServer({}, async ({ origin }) => {
+    const res = await fetch(`${origin}/pipes/demo-loop/run?format=json`);
+    assert.equal(res.status, 200);
+    const { items } = await res.json();
+    assert.ok(items.length > 0, 'demo-loop could not reach demo-headline');
+  }));
+
+// ----------------------------------------------------------------- base URL
+
+test('OPENPIPES_BASE_URL is what feed links carry, not the Host header', () =>
+  // localhost resolves to the running server, which matters: the demo pipe
+  // fetches /demo/*.xml relative to the base URL and the suite has no network
+  withServer((port) => ({ OPENPIPES_BASE_URL: `http://localhost:${port}` }), async ({ origin }) => {
+    const res = await fetch(`${origin}/pipes/demo-merged/run`);
+    assert.equal(res.status, 200);
+    const body = await res.text();
+    const link = body.match(/<link>([^<]+)<\/link>/)[1];
+    const self = body.match(/<atom:link href="([^"]+)" rel="self"/)[1];
+    assert.match(link, /^http:\/\/localhost:/);
+    assert.match(self, /^http:\/\/localhost:/);
+  }));
+
+test('OPENPIPES_BASE_URL must be a bare origin', async () => {
+  await expectBootFailure({ OPENPIPES_BASE_URL: 'https://x.example/sub/' }, /OPENPIPES_BASE_URL/);
+  await expectBootFailure({ OPENPIPES_BASE_URL: 'ftp://x.example' }, /OPENPIPES_BASE_URL/);
+  await expectBootFailure({ OPENPIPES_BASE_URL: 'not a url' }, /OPENPIPES_BASE_URL/);
+});
+
+test('OPENPIPES_BASE_URL may carry a trailing slash', () =>
+  withServer((port) => ({ OPENPIPES_BASE_URL: `http://localhost:${port}/` }), async ({ origin }) => {
+    const body = await (await fetch(`${origin}/pipes/demo-merged/run`)).text();
+    assert.match(body.match(/<link>([^<]+)<\/link>/)[1], /^http:\/\/localhost:\d+\/pipes\//);
   }));
 
 // ------------------------------------------------------------- address filter

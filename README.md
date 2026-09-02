@@ -4,7 +4,7 @@
 
 Yahoo! Pipes クローンです。ブラウザ上のビジュアルエディタでフィード処理パイプライン(「パイプ」)を組み立て、サーバーサイドのエンジンで実行し、結果を RSS 2.0 / JSON として再配信できます。
 
-- **依存パッケージゼロ** — Node.js >= 18 の標準機能のみ。フロントエンドも素の JS / CSS / HTML(CDN なし、ビルド不要)
+- **依存パッケージゼロ** — Node.js >= 22.13 の標準機能のみ(保存には `node:sqlite` を使います)。フロントエンドも素の JS / CSS / HTML(CDN なし、ビルド不要)
 - すべて ESM
 
 ## クイックスタート
@@ -13,7 +13,24 @@ Yahoo! Pipes クローンです。ブラウザ上のビジュアルエディタ�
 node server.js
 ```
 
-ブラウザで http://localhost:3000 を開きます。ポートは環境変数で変更できます: `PORT=8080 node server.js`。`PORT` が無ければ Pterodactyl 系のホスティングパネルが渡す `SERVER_PORT` を読み、どちらも無ければ 3000 です。待ち受けアドレスは既定で全インターフェースですが、前段にリバースプロキシがあるホスティングでループバックだけに閉じたいときは `OPENPIPES_HOST=127.0.0.1` を設定します。
+ブラウザで http://localhost:3000 を開きます。Node.js 22.13 以上が必要です(保存に使う `node:sqlite` がフラグなしで使える最初のバージョンです)。
+
+初回起動時に `data/openpipes.db` が作られ、保存したパイプ・ユーザー・セッションはすべてここに入ります。置き場所を変えるには `OPENPIPES_DB=/var/lib/openpipes/openpipes.db` のように指定します(親ディレクトリは自動で作られます)。
+
+ポートは環境変数で変更できます: `PORT=8080 node server.js`。`PORT` が無ければ Pterodactyl 系のホスティングパネルが渡す `SERVER_PORT` を読み、どちらも無ければ 3000 です。待ち受けアドレスは既定で全インターフェースですが、前段にリバースプロキシがあるホスティングでループバックだけに閉じたいときは `OPENPIPES_HOST=127.0.0.1` を設定します。
+
+公開 URL がホスト名と違う場合(リバースプロキシ配下や HTTPS 終端がある場合)は `OPENPIPES_BASE_URL=https://pipes.example.com` を設定します。配信するフィードのリンクと、パイプ内の相対 URL の解決先がこの URL になります。パス・クエリ・フラグメントの付いた値は起動時に拒否します。
+
+### バックアップ
+
+データベース 1 ファイルだけを保存すれば済みます。稼働したままコピーすると WAL の途中を掴むおそれがあるので、次のどれかにしてください。
+
+```sh
+sqlite3 data/openpipes.db ".backup backup.db"                # sqlite3 コマンドがあるなら
+node -e "new (require('node:sqlite').DatabaseSync)('data/openpipes.db').exec(\"VACUUM INTO 'backup.db'\")"
+```
+
+下の node ワンライナー(`VACUUM INTO`)は動作確認済みです。サーバーを止めてからファイルをコピーしてもかまいませんが、その場合は `data/openpipes.db-wal` と `-shm` も一緒にコピーしてください。
 
 ## 使い方
 
@@ -110,7 +127,8 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 
 - `x` / `y` はキャンバス座標で、エンジンは無視します
 - 入力ポートへのワイヤーは 1 本まで、出力ポートは自由に分岐できます
-- 保存ファイル(`data/pipes/<id>.json`)は上記に `id` と `savedAt` が付いた形式です
+- 保存したパイプは上記に `id` と `savedAt` が付いた形になり、`data/openpipes.db`(SQLite)の中に入ります。読み込みメニューの「JSON を書き出す / 読み込む」で、この形のファイルとやり取りできます
+- `id` は名前を ascii に潰したもの(40 文字まで)+ `-` + 16 桁の 16 進数です。公開フィード URL には id しか入らないので、**id を知っていることがそのフィードを読める資格**になります(パイプの中に非公開の取得先 URL が入っていることがあるため、推測できない長さにしてあります)
 
 ## HTTP API
 
@@ -121,16 +139,16 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 | GET | `/demo/<name>.xml` | 同梱デモフィード(`assets/demo/`) |
 | GET | `/api/modules` | モジュールカタログ(JSON) |
 | POST | `/api/run` | body `{ pipe, params? }` → `{ items, debug, errors }`(不正なパイプは 400 `{error}`) |
-| GET | `/api/pipes` | 保存済みパイプ一覧 `[{ id, name, savedAt }]`(savedAt 降順) |
-| POST | `/api/pipes` | body `{ id?, name, modules, wires }` → 保存して `{ id }` を返す |
-| GET | `/api/pipes/:id` | 保存ファイルの JSON(存在しなければ 404 `{error}`) |
-| DELETE | `/api/pipes/:id` | `{ ok: true }` |
+| GET | `/api/pipes` | パイプ一覧 `[{ id, name, savedAt, readOnly }]`(自分のパイプが savedAt 降順、その後にデモ) |
+| POST | `/api/pipes` | body `{ id?, name, modules, wires }` → 保存して `{ id }` を返す。`id` 無しなら新規作成、`id` 付きは更新なのでデモは 403、自分のものでない id は 404 |
+| GET | `/api/pipes/:id` | パイプの JSON + `readOnly`(存在しない・自分のものでなければ 404 `{error}`) |
+| DELETE | `/api/pipes/:id` | `{ ok: true }`(デモは 403) |
 | GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で素の JSON、`?format=jsonfeed` で JSON Feed 1.1)。`format` 以外のクエリはパイプパラメータになる |
 | GET | `/api/config` | `{ readOnly, authRequired }`(常に認証不要) |
 
 ## デモパイプ
 
-2 つのサンプルパイプが同梱されています(読み込み ▾ から開けます)。
+4 つのサンプルパイプが同梱されています(読み込み ▾ から開けます)。中身は `assets/demo/pipes/*.json` で、データベースではなくファイルとして読み込まれる **組み込みパイプ**です。誰から見ても同じものが一覧に出て、**読み取り専用**なので上書き保存も削除もできません(それぞれ 403)。手を入れたいときは読み込みメニューの ⧉ で複製すると、自分のパイプになります。
 
 - **デモ: テックニュース絞り込み** (`demo-tech-filter`) — デモフィード `/demo/tech.xml` を取得し、タイトルにキーワード `${q}`(既定 "AI")を含むアイテムだけを許可 → pubDate 降順ソート → 先頭 5 件 → 出力。`?q=Rust` のように URL からキーワードを差し替えられます
 - **デモ: フィードのマージ** (`demo-merged`) — `/demo/tech.xml` と `/demo/world.xml` の 2 フィードを Union で連結し、タイトルで重複排除 → pubDate 降順ソート → 出力
@@ -182,6 +200,6 @@ npm test
 npm run test:e2e
 ```
 
-`test/e2e/run.mjs` が専用ポートでサーバーを起動し、ヘッドレス Chromium を CDP で操作して実際に配置・結線・実行・Undo/Redo・保存/削除を行い、終了時に後片付けします。保存先は一時ディレクトリなので `data/pipes/` は汚れません。Chromium が PATH に無い場合は `CHROME_BIN` を指定してください。Node.js 22 以上が必要です(グローバル `WebSocket` を使うため)。
+`test/e2e/run.mjs` が専用ポートでサーバーを起動し、ヘッドレス Chromium を CDP で操作して実際に配置・結線・実行・Undo/Redo・保存/削除を行い、終了時に後片付けします。保存先は `:memory:` のデータベースなので `data/openpipes.db` は汚れません。Chromium が PATH に無い場合は `CHROME_BIN` を指定してください。一式で数分かかるので、触ったところだけ試したいときは `E2E_ONLY='saved pipes' npm run test:e2e` のようにスイート名の一部を指定できます。
 
-GitHub Actions では main への push と Pull Request のたびに、ユニットテストを Node.js 18 / 20 / 22 / 24 で、ブラウザテストを Node.js 24 で実行します(`.github/workflows/test.yml`)。
+GitHub Actions では main への push と Pull Request のたびに、ユニットテストを Node.js 22 / 24 で、ブラウザテストを Node.js 24 で実行します(`.github/workflows/test.yml`)。

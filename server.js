@@ -2,18 +2,59 @@ import http from 'node:http';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 
 import { runPipe, catalog, PipeError } from './lib/engine.js';
 import { buildJSONFeed, buildRSS } from './lib/feed.js';
+import { httpError } from './lib/errors.js';
+import { openStore, validatePipeBody } from './lib/store.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const DEMO_DIR = path.join(ROOT, 'assets', 'demo');
-// OPENPIPES_DATA lets a test run point at a throwaway directory
-const PIPES_DIR = process.env.OPENPIPES_DATA
-  ? path.resolve(process.env.OPENPIPES_DATA)
-  : path.join(ROOT, 'data', 'pipes');
+// The demo pipes ship as files rather than rows: they belong to nobody and are
+// the same for every user, so they are read once at boot and never written.
+const SYSTEM_PIPES_DIR = path.join(DEMO_DIR, 'pipes');
+// Everything the server stores lives in one SQLite file. OPENPIPES_DB points
+// it somewhere else; ':memory:' is what the test suites use.
+const DB_PATH = (() => {
+  const raw = process.env.OPENPIPES_DB;
+  if (!raw) return path.join(ROOT, 'data', 'openpipes.db');
+  return raw === ':memory:' ? ':memory:' : path.resolve(raw);
+})();
+
+// Refusing to start beats starting with a configuration that would only fail
+// later, in the middle of somebody's login.
+function bootFailure(message) {
+  console.error(message);
+  process.exit(1);
+}
+
+// The public origin, when it is not simply the Host header: the OAuth
+// redirect_uri has to match what is registered with the provider exactly, and
+// feed links should carry the address subscribers actually use.
+const BASE_URL = (() => {
+  const raw = process.env.OPENPIPES_BASE_URL;
+  if (!raw) return null;
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return bootFailure(`OPENPIPES_BASE_URL is not a URL: ${raw}`);
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return bootFailure(`OPENPIPES_BASE_URL must be an http(s) URL: ${raw}`);
+  }
+  if (url.username || url.password || url.search || url.hash ||
+      (url.pathname !== '/' && url.pathname !== '')) {
+    return bootFailure(
+      `OPENPIPES_BASE_URL must be a bare origin such as https://pipes.example.com, not ${raw}`);
+  }
+  return url.origin; // no trailing slash
+})();
+
+// Owner of everything stored when there is no login: the single local operator.
+const LOCAL_USER = 'local';
 
 // PORT is the usual knob. SERVER_PORT is what Pterodactyl-style hosting panels
 // export for the one allocation a container gets, so it serves as a fallback.
@@ -40,7 +81,6 @@ const CACHE_TTL_SECONDS = (() => {
 })();
 const CACHE_MAX_ENTRIES = 100;
 const MAX_BODY_BYTES = 1024 * 1024;
-const PIPE_ID_RE = /^[a-z0-9-]{1,64}$/;
 
 // key -> { expires, etag, contentType, body }, in insertion order so the
 // oldest can be dropped once it is full.
@@ -77,13 +117,6 @@ const CONTENT_TYPES = {
   '.json': 'application/json; charset=utf-8',
 };
 
-function httpError(status, message, headers) {
-  const err = new Error(message);
-  err.status = status;
-  if (headers) err.headers = headers;
-  return err;
-}
-
 // Hashing first so the comparison is over equal-length buffers whatever the
 // inputs were.
 function secretEquals(a, b) {
@@ -114,8 +147,15 @@ function sendJSON(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+// Short enough to read in the boot line, absolute when it is somewhere else.
+function dbLabel() {
+  if (DB_PATH === ':memory:') return ':memory:';
+  const rel = path.relative(ROOT, DB_PATH);
+  return rel && !rel.startsWith('..') ? rel : DB_PATH;
+}
+
 function baseUrlOf(req) {
-  return 'http://' + (req.headers.host || '127.0.0.1:' + PORT);
+  return BASE_URL || 'http://' + (req.headers.host || '127.0.0.1:' + PORT);
 }
 
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
@@ -147,31 +187,14 @@ async function readJSONBody(req) {
   }
 }
 
-function slugify(name) {
-  const slug = String(name)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 59)
-    .replace(/-+$/, '');
-  return slug || 'pipe';
-}
-
-async function loadPipe(id) {
-  if (!PIPE_ID_RE.test(id)) throw httpError(400, 'Invalid pipe id');
-  let text;
-  try {
-    text = await readFile(path.join(PIPES_DIR, id + '.json'), 'utf8');
-  } catch (err) {
-    if (err.code === 'ENOENT') throw httpError(404, 'Pipe not found: ' + id);
-    throw err;
-  }
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw httpError(500, 'Saved pipe file is corrupted: ' + id);
-  }
-}
+// What the Loop module gets to call. Bound to one owner, so a sub-pipe lookup
+// can only ever reach that owner's pipes and the built-in demos: the public
+// feed URL stays the only path by which one user's data reaches another.
+const loaderFor = (ownerId) => (id) => {
+  const pipe = store.getPipe(id, ownerId);
+  if (!pipe) throw httpError(404, 'Pipe not found: ' + id);
+  return pipe;
+};
 
 async function serveFile(res, rootDir, relPath) {
   const filePath = path.resolve(rootDir, relPath);
@@ -210,86 +233,29 @@ async function handleRunAdHoc(req, res) {
     params: body.params || {},
     baseUrl: baseUrlOf(req),
     allowPrivate: ALLOW_PRIVATE,
-    loadPipe, // the Loop module runs a saved pipe per item
+    loadPipe: loaderFor(LOCAL_USER), // the Loop module runs a saved pipe per item
   });
   sendJSON(res, 200, result);
 }
 
 async function handleListPipes(req, res) {
-  let names = [];
-  try {
-    names = await readdir(PIPES_DIR);
-  } catch {
-    names = [];
-  }
-  const list = [];
-  for (const name of names) {
-    if (!name.endsWith('.json')) continue;
-    try {
-      const pipe = JSON.parse(await readFile(path.join(PIPES_DIR, name), 'utf8'));
-      list.push({ id: pipe.id, name: pipe.name, savedAt: pipe.savedAt });
-    } catch {
-      // Skip unreadable/corrupt files rather than failing the listing.
-    }
-  }
-  list.sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
-  sendJSON(res, 200, list);
+  sendJSON(res, 200, store.listPipes(LOCAL_USER));
 }
 
 async function handleSavePipe(req, res) {
   const body = await readJSONBody(req);
-  if (
-    typeof body !== 'object' || body === null ||
-    typeof body.name !== 'string' || !Array.isArray(body.modules) || !Array.isArray(body.wires)
-  ) {
-    throw httpError(400, 'Body must include name (string), modules (array) and wires (array)');
-  }
-  const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-  const moduleIds = new Set();
-  for (const m of body.modules) {
-    if (!isPlainObject(m) || typeof m.id !== 'string' || m.id === '' || typeof m.type !== 'string') {
-      throw httpError(400, 'Every module needs an object shape with string id and type');
-    }
-    if (moduleIds.has(m.id)) throw httpError(400, `Duplicate module id: ${m.id}`);
-    moduleIds.add(m.id);
-    if (m.params !== undefined && !isPlainObject(m.params)) {
-      throw httpError(400, `Module ${m.id}: params must be an object`);
-    }
-  }
-  for (const w of body.wires) {
-    if (!isPlainObject(w) || !isPlainObject(w.from) || !isPlainObject(w.to)) {
-      throw httpError(400, 'Every wire needs an object shape with from/to objects');
-    }
-  }
-  let id = body.id;
-  if (id === undefined || id === null || id === '') {
-    id = slugify(body.name) + '-' + crypto.randomBytes(2).toString('hex');
-  } else if (typeof id !== 'string' || !PIPE_ID_RE.test(id)) {
-    throw httpError(400, 'Invalid pipe id');
-  }
-  const saved = {
-    id,
-    name: body.name,
-    savedAt: new Date().toISOString(),
-    modules: body.modules,
-    wires: body.wires,
-  };
-  await writeFile(path.join(PIPES_DIR, id + '.json'), JSON.stringify(saved, null, 2) + '\n');
-  sendJSON(res, 200, { id });
+  validatePipeBody(body);
+  sendJSON(res, 200, store.savePipe(LOCAL_USER, body));
 }
 
 async function handleGetPipe(req, res, match) {
-  sendJSON(res, 200, await loadPipe(match[1]));
+  const pipe = store.getPipe(match[1], LOCAL_USER);
+  if (!pipe) throw httpError(404, 'Pipe not found: ' + match[1]);
+  sendJSON(res, 200, pipe);
 }
 
 async function handleDeletePipe(req, res, match) {
-  const id = match[1];
-  if (!PIPE_ID_RE.test(id)) throw httpError(400, 'Invalid pipe id');
-  try {
-    await unlink(path.join(PIPES_DIR, id + '.json'));
-  } catch (err) {
-    if (err.code !== 'ENOENT') throw err;
-  }
+  store.deletePipe(match[1], LOCAL_USER);
   sendJSON(res, 200, { ok: true });
 }
 
@@ -313,7 +279,9 @@ function sendFeed(req, res, entry, cacheState) {
 }
 
 async function handleRunSaved(req, res, match, url) {
-  const pipe = await loadPipe(match[1]);
+  const published = store.publishedPipe(match[1]);
+  if (!published) throw httpError(404, 'Pipe not found: ' + match[1]);
+  const { pipe, ownerId } = published;
   const outputs = (pipe.modules || []).filter((m) => m && m.type === 'output');
   if (outputs.length !== 1) {
     throw httpError(400, 'Pipe must have exactly one output module');
@@ -337,7 +305,7 @@ async function handleRunSaved(req, res, match, url) {
   }
 
   const result = await runPipe(pipe,
-    { params, baseUrl: baseUrlOf(req), allowPrivate: ALLOW_PRIVATE, loadPipe });
+    { params, baseUrl: baseUrlOf(req), allowPrivate: ALLOW_PRIVATE, loadPipe: loaderFor(ownerId) });
   if (Array.isArray(result.errors) && result.errors.length > 0) {
     // a failed run is never cached: the upstream may just be having a moment
     throw httpError(502, result.errors.map((e) => `${e.module}: ${e.message}`).join('; '));
@@ -448,14 +416,35 @@ process.on('unhandledRejection', (reason) => {
   console.error('unhandledRejection:', reason);
 });
 
-await mkdir(PIPES_DIR, { recursive: true });
+if (DB_PATH !== ':memory:') await mkdir(path.dirname(DB_PATH), { recursive: true });
+let store;
+try {
+  store = openStore({ dbPath: DB_PATH, systemPipesDir: SYSTEM_PIPES_DIR });
+} catch (err) {
+  bootFailure(`Failed to open the database: ${err.message}`);
+}
+store.ensureLocalUser();
+store.purgeExpiredSessions();
+// Rows of dead sessions are harmless but unbounded; sweep them now and then.
+setInterval(() => store.purgeExpiredSessions(), 3600_000).unref();
+
+// A container stops the process with a signal, and an unclosed WAL means the
+// next boot has to recover it.
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.on(signal, () => {
+    server.close();
+    store.close();
+    process.exit(0);
+  });
+}
+
 server.on('error', (err) => {
   // a server that cannot bind must not linger as a zombie process
   console.error(`Failed to start: ${err.message}`);
   process.exit(1);
 });
 server.listen({ port: PORT, host: HOST }, () => {
-  const notes = [];
+  const notes = [`db ${dbLabel()}`];
   if (AUTH_PASSWORD) notes.push(`auth as "${AUTH_USER}"`);
   if (READ_ONLY) notes.push('read-only');
   if (ALLOW_PRIVATE) notes.push('private addresses allowed');

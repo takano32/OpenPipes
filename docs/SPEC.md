@@ -9,9 +9,11 @@ in this repo must conform to it exactly.
 
 ## Ground rules
 
-- **Zero dependencies.** Node.js >= 18 built-ins only (`node:http`, `node:fs`,
-  `node:path`, `node:crypto`, global `fetch`). Frontend is vanilla JS/CSS/HTML,
-  no CDN, no build step.
+- **Zero dependencies.** Node.js >= 22.13 built-ins only (`node:http`,
+  `node:fs`, `node:path`, `node:crypto`, `node:sqlite`, global `fetch`).
+  Frontend is vanilla JS/CSS/HTML, no CDN, no build step. 22.13 is the first
+  release where `node:sqlite` needs no flag, so it is imported statically and
+  there is no fallback store.
 - ESM everywhere (`package.json` has `"type": "module"`).
 - Start with `node server.js` (default port 3000, `PORT` env overrides).
 - All server code must never crash the process on bad input: every request
@@ -21,19 +23,22 @@ in this repo must conform to it exactly.
 ## File layout
 
 ```
-server.js              HTTP server, routing, static files, RSS endpoint
-lib/feed.js            fetch + RSS/Atom/RDF parsing + RSS 2.0 output builder
-lib/html.js            tolerant HTML parser + CSS selector engine (Fetch Page)
-lib/engine.js          module catalog + pipe executor
-public/index.html      editor page shell
-public/editor.css      editor styles
-public/editor.js       editor logic (single file, vanilla JS)
-assets/demo/tech.xml   built-in demo feed (RSS 2.0, tech news)
-assets/demo/world.xml  built-in demo feed (RSS 2.0, world news)
-data/pipes/*.json      saved pipes (server writes here; ships with 2 samples)
-test/run-tests.js      dependency-free test suite (`npm test`)
-docs/SPEC.md           this file
-README.md              user documentation (Japanese)
+server.js                  HTTP server, routing, static files, RSS endpoint
+lib/feed.js                fetch + RSS/Atom/RDF parsing + RSS 2.0 output builder
+lib/html.js                tolerant HTML parser + CSS selector engine (Fetch Page)
+lib/engine.js              module catalog + pipe executor
+lib/store.js               SQLite storage: users, sessions, pipes
+lib/errors.js              httpError(status, message, headers)
+public/index.html          editor page shell
+public/editor.css          editor styles
+public/editor.js           editor logic (single file, vanilla JS)
+assets/demo/tech.xml       built-in demo feed (RSS 2.0, tech news)
+assets/demo/world.xml      built-in demo feed (RSS 2.0, world news)
+assets/demo/pipes/*.json   the 4 built-in demo pipes, read-only for everyone
+data/openpipes.db          the database (created on first boot; not in git)
+test/run-tests.js          dependency-free test suite (`npm test`)
+docs/SPEC.md               this file
+README.md                  user documentation (Japanese)
 ```
 
 ## Data model
@@ -66,15 +71,78 @@ index arrays numerically (`enclosures.0.url`).
 - `x`/`y` are canvas coordinates (integers); the engine ignores them.
 - Each **input port accepts at most one wire**; output ports fan out freely.
 
-### Saved pipe file (`data/pipes/<id>.json`)
+### Stored pipes
 
-```json
-{ "id": "demo-tech-filter", "name": "...", "savedAt": "2026-07-30T00:00:00.000Z",
-  "modules": [...], "wires": [...] }
+Everything the server keeps lives in one SQLite database (`node:sqlite`):
+`data/openpipes.db` by default, `OPENPIPES_DB` to put it elsewhere, and
+`:memory:` — which the test suites use — is accepted. The parent directory is
+created at boot. The connection sets `journal_mode = WAL`, `busy_timeout =
+5000` and `foreign_keys = ON`; every table is created `IF NOT EXISTS`.
+
+```sql
+CREATE TABLE users (
+  id            TEXT PRIMARY KEY,          -- 'local', or 'u-' + 16 hex chars
+  provider      TEXT NOT NULL,             -- 'local' | 'google'
+  subject       TEXT NOT NULL,             -- the provider's subject id
+  email         TEXT,
+  name          TEXT,
+  picture       TEXT,
+  created_at    TEXT NOT NULL,             -- ISO 8601 UTC
+  last_login_at TEXT NOT NULL,
+  UNIQUE (provider, subject)
+);
+CREATE TABLE sessions (
+  id_hash     TEXT PRIMARY KEY,            -- base64url(sha256(cookie token))
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL
+);
+CREATE INDEX sessions_user ON sessions(user_id);
+CREATE TABLE pipes (
+  id          TEXT PRIMARY KEY,            -- globally unique
+  owner_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        TEXT NOT NULL,
+  saved_at    TEXT NOT NULL,
+  definition  TEXT NOT NULL                -- JSON {"modules": [...], "wires": [...]}
+);
+CREATE INDEX pipes_owner ON pipes(owner_id, saved_at DESC);
 ```
 
-`id` is `[a-z0-9-]+`, derived from the name (slugified, ascii-only) plus a
-random 4-hex suffix when first saved; non-ascii names fall back to `pipe-<hex>`.
+Timestamps are ISO 8601 UTC strings, which compare correctly as text, so an
+expiry check is a plain `<=`. A pipe as the API hands it back is the columns
+plus the parsed definition:
+
+```json
+{ "id": "...", "name": "...", "savedAt": "2026-07-30T00:00:00.000Z",
+  "modules": [...], "wires": [...], "readOnly": false }
+```
+
+**Ownership.** Every pipe belongs to one user. Every statement that touches
+`pipes` carries `WHERE owner_id = ?` except the single lookup behind
+`publishedPipe()`, which is what makes `/pipes/:id/run` public. There is no
+method that lists or reads across owners, and a pipe belonging to somebody
+else is indistinguishable from one that does not exist (404), so ids do not
+leak. With no login configured, every request acts as the fixed user `local`,
+created at boot.
+
+**Ids** are `slugify(name)` — lower-case ascii, runs of anything else
+collapsed to `-`, capped at **40** characters, `pipe` when nothing survives —
+then `-`, then 16 hex characters (8 random bytes); the whole thing matches
+`[a-z0-9-]{1,64}`. The random half is not decoration: the public feed URL
+carries only the id, so the id *is* the capability to read that feed, and a
+pipe may embed private upstream URLs. A fresh id that collides with anything
+stored or built in is regenerated.
+
+**System pipes.** The demo pipes in `assets/demo/pipes/*.json` keep the file
+shape above (`id`, `name`, `savedAt`, `modules`, `wires`). They are read once
+at boot, validated with the same validator the save endpoint uses, and kept in
+memory; they are never written to the database. A file that is not valid JSON,
+fails validation, has no `id` matching `[a-z0-9-]{1,64}`, is not named
+`<id>.json`, or has no `savedAt` makes the server refuse to start rather than
+being skipped. They are listed for every user with `readOnly: true` after that
+user's own pipes, are loadable by anyone, and a Loop in any pipe can reach
+them. Saving over one is 403, deleting one is 403; duplicating one is just a
+save with no `id`, which produces an ordinary pipe owned by whoever saved it.
 
 ## Module catalog
 
@@ -351,6 +419,36 @@ export function buildJSONFeed({ title, link, description, items }) // -> JSON Fe
   `Char` production (control chars except tab/LF/CR, U+FFFE/U+FFFF) — one
   poisoned upstream item must not make the whole published feed unparseable.
 
+## Store API (`lib/store.js`)
+
+Synchronous throughout, because `node:sqlite` is. Errors carry `status` (from
+`lib/errors.js`) so the router maps them to JSON exactly like any other.
+
+```
+openStore({ dbPath, systemPipesDir })  -> Store    (also validates the system pipes)
+validatePipeBody(body)                 -> body     (throws 400 on anything else)
+slugify(name)                          -> string   (ascii, <= 40 chars)
+
+Store.ensureLocalUser()                -> 'local'
+Store.upsertUser({ provider, subject, email, name, picture }) -> user row
+Store.createSession(userId, ttlMs)     -> token (32 random bytes, base64url; only its hash is stored)
+Store.sessionUser(token)               -> user row | null   (null when missing or expired)
+Store.deleteSession(token)             -> void
+Store.purgeExpiredSessions()           -> void
+
+Store.listPipes(ownerId)               -> [{ id, name, savedAt, readOnly }]
+Store.getPipe(id, ownerId)             -> pipe | null       (own row, else a system pipe;
+                                                             ownerId null = system pipes only)
+Store.savePipe(ownerId, { id?, name, modules, wires }) -> { id }   (403 system, 404 not yours)
+Store.deletePipe(id, ownerId)          -> void              (403 system, 0 rows is not an error)
+Store.publishedPipe(id)                -> { pipe, ownerId } | null   (the only cross-owner lookup;
+                                                                      ownerId null for a demo)
+Store.close()
+```
+
+An id that does not match `[a-z0-9-]{1,64}` throws 400 from whichever method
+received it.
+
 ## HTTP API (`server.js`)
 
 | Method | Path                  | Behavior |
@@ -360,12 +458,12 @@ export function buildJSONFeed({ title, link, description, items }) // -> JSON Fe
 | GET    | `/demo/<name>.xml`    | from `assets/demo/` (content-type `application/rss+xml`) |
 | GET    | `/api/modules`        | `catalog()` JSON |
 | POST   | `/api/run`            | body `{ pipe, params? }` → `{ items, debug, errors }`; `PipeError` → 400 `{error}` |
-| GET    | `/api/pipes`          | `[{ id, name, savedAt }]` sorted by savedAt desc |
-| POST   | `/api/pipes`          | body `{ id?, name, modules, wires }` → saves, returns `{ id }` (new id when none given). Rejects (400) modules that aren't objects with string `id`/`type`, duplicate module ids, non-object `params`, and wires without `from`/`to` objects — a saved file the editor cannot render must never be creatable |
-| GET    | `/api/pipes/:id`      | full saved file JSON, 404 `{error}` if missing |
-| DELETE | `/api/pipes/:id`      | `{ ok: true }` |
+| GET    | `/api/pipes`          | `[{ id, name, savedAt, readOnly }]` — the caller's own pipes by savedAt desc, then the built-in demos (`readOnly: true`) |
+| POST   | `/api/pipes`          | body `{ id?, name, modules, wires }` → saves, returns `{ id }`. No `id`: a new pipe is created under a fresh id. An `id`: an **update**, so 403 for a built-in demo (save it as a copy) and 404 for an id that is not yours — including one that does not exist. Rejects (400) modules that aren't objects with string `id`/`type`, duplicate module ids, non-object `params`, and wires without `from`/`to` objects — a pipe the editor cannot render must never be creatable |
+| GET    | `/api/pipes/:id`      | the stored pipe plus `readOnly`, 404 `{error}` if it is missing or somebody else's |
+| DELETE | `/api/pipes/:id`      | `{ ok: true }`; 403 for a built-in demo. Deleting an id you do not own is a no-op, not an error |
 | GET    | `/api/config`         | `{ readOnly, authRequired }` — what the editor needs to know about this instance. Always public |
-| GET    | `/pipes/:id/run`      | executes saved pipe (cached, ETag + 304). `?format=json` → `{ items }`; `?format=jsonfeed` → JSON Feed 1.1 (`application/feed+json`); default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
+| GET    | `/pipes/:id/run`      | executes the saved pipe, whoever owns it (the id is the capability) (cached, ETag + 304). `?format=json` → `{ items }`; `?format=jsonfeed` → JSON Feed 1.1 (`application/feed+json`); default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
 
 ### Feed caching
 
@@ -403,11 +501,28 @@ Everything else — the editor page, its assets, and the rest of `/api/*` — is
 behind the password when one is set.
 
 Implementation notes: hand-rolled router (method + regex table). JSON bodies
-limited to 1 MB. Pipe ids validated `[a-z0-9-]{1,64}` before touching the
-filesystem; static paths resolved and verified inside their root dir. `Cache-
-Control: no-store` on `/api/*`. Server logs one line per request. On boot,
-create `data/pipes/` if missing and print the URL. `baseUrl` passed to the
-engine = `http://<Host header>` (fallback `http://127.0.0.1:<port>`).
+limited to 1 MB. Pipe ids validated `[a-z0-9-]{1,64}` before any lookup;
+static paths resolved and verified inside their root dir. `Cache-Control:
+no-store` on `/api/*`. Server logs one line per request. On boot, create the
+database's directory if missing, open the store, ensure the `local` user
+exists, purge expired sessions (and hourly after that, on an `unref`ed timer)
+and print the URL and the database path. `SIGINT`/`SIGTERM` close the store
+and exit 0.
+
+`baseUrl` passed to the engine, and the origin feed links carry, is
+`OPENPIPES_BASE_URL` when set, else `http://<Host header>` (fallback
+`http://127.0.0.1:<port>`). `OPENPIPES_BASE_URL` must be a bare http(s) origin
+— no path, query or fragment; one trailing slash is stripped — and the server
+refuses to start otherwise. Setting it makes a pipe's relative URLs resolve
+through the public address, so behind a proxy the proxy has to be reachable
+from the app.
+
+The **Loop** module gets a loader bound to the owner of the pipe being run —
+`/api/run` to the caller, `/pipes/:id/run` to the pipe's owner (`null`, i.e.
+demos only, for a built-in demo). A sub-pipe lookup therefore reaches that
+owner's pipes and the built-in demos and nothing else, so the public feed URL
+is the only path by which one user's data reaches another. `demo-loop` finds
+`demo-headline` because both are built in.
 
 ## Frontend (public/)
 

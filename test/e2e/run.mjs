@@ -7,8 +7,6 @@
 // Set CHROME_BIN if your browser is not on PATH under a usual name.
 
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, cp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -60,10 +58,6 @@ async function startBrowser(port) {
     '. Install chromium or point CHROME_BIN at a browser.');
 }
 
-const dataDir = await mkdtemp(path.join(tmpdir(), 'openpipes-e2e-'));
-// the suites expect the shipped demo pipes to be loadable
-await cp(path.join(ROOT, 'data', 'pipes'), dataDir, { recursive: true });
-
 // Ports derived from the pid collide when two runs overlap — the second one
 // then talks to the first one's dying browser. Ask the OS for free ones.
 async function freePort() {
@@ -78,12 +72,15 @@ async function freePort() {
   });
 }
 
+// E2E_ONLY=<substring> runs only the suites whose name contains it.
+const only = process.env.E2E_ONLY || '';
+
 const appPort = await freePort();
 const cdpPort = await freePort();
 const origin = `http://127.0.0.1:${appPort}`;
 
 const server = spawnQuiet(process.execPath, [path.join(ROOT, 'server.js')],
-  { PORT: String(appPort), OPENPIPES_DATA: dataDir });
+  { PORT: String(appPort), OPENPIPES_DB: ':memory:' });
 let browser = null;
 let page = null;
 let failures = 0;
@@ -93,7 +90,6 @@ const cleanup = async () => {
   try { page?.close(); } catch { /* already gone */ }
   server.child.kill('SIGKILL');
   browser?.child.kill('SIGKILL');
-  await rm(dataDir, { recursive: true, force: true }).catch(() => {});
 };
 
 try {
@@ -102,6 +98,9 @@ try {
   console.log(`browser: ${browser.bin}   app: ${origin}\n`);
 
   for (const [name, run] of suites) {
+    // A whole run takes minutes and loads the machine; E2E_ONLY=<substring>
+    // narrows it to the suite you are working on.
+    if (only && !name.includes(only)) continue;
     page = await connect(cdpPort);
     const before = failures;
     const check = (label, ok, extra) => {

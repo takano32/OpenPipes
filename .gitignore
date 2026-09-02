@@ -2,6 +2,7 @@ node_modules/
 *.log
 .DS_Store
 
-# Pipes saved from the editor live here; only the shipped demos are tracked.
-data/pipes/*
-!data/pipes/demo-*.json
+# The SQLite database the server creates on first boot, plus its WAL sidecars.
+data/*.db
+data/*.db-wal
+data/*.db-shm
