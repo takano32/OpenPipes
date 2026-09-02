@@ -17,20 +17,26 @@ node server.js
 
 初回起動時に `data/openpipes.db` が作られ、保存したパイプ・ユーザー・セッションはすべてここに入ります。置き場所を変えるには `OPENPIPES_DB=/var/lib/openpipes/openpipes.db` のように指定します(親ディレクトリは自動で作られます)。
 
+以前のバージョンから上げる場合: **`data/pipes/*.json` は自動では移行されません**(旧 `OPENPIPES_DATA` も読まれなくなりました)。残しておきたいパイプがあれば、その JSON を手元に取っておいて、エディタの読み込み ▾ →「⭱ JSON を読み込む…」で入れ直してください。同梱デモの 4 件は `assets/demo/pipes/` に移り、組み込みパイプとして最初から一覧に出ます。
+
 ポートは環境変数で変更できます: `PORT=8080 node server.js`。`PORT` が無ければ Pterodactyl 系のホスティングパネルが渡す `SERVER_PORT` を読み、どちらも無ければ 3000 です。待ち受けアドレスは既定で全インターフェースですが、前段にリバースプロキシがあるホスティングでループバックだけに閉じたいときは `OPENPIPES_HOST=127.0.0.1` を設定します。
 
 公開 URL がホスト名と違う場合(リバースプロキシ配下や HTTPS 終端がある場合)は `OPENPIPES_BASE_URL=https://pipes.example.com` を設定します。配信するフィードのリンクと、パイプ内の相対 URL の解決先がこの URL になります。パス・クエリ・フラグメントの付いた値は起動時に拒否します。
 
 ### バックアップ
 
-データベース 1 ファイルだけを保存すれば済みます。稼働したままコピーすると WAL の途中を掴むおそれがあるので、次のどれかにしてください。
+データベース 1 ファイルだけを保存すれば済みます。ただし**稼働したまま `openpipes.db` だけを `cp` してはいけません**。書き込みは WAL 側に溜まっているので、コピーは行が欠けるどころか**テーブルが 1 つも無いデータベース**になることがあります(実測)。次のどれかにしてください。
 
 ```sh
 sqlite3 data/openpipes.db ".backup backup.db"                # sqlite3 コマンドがあるなら
 node -e "new (require('node:sqlite').DatabaseSync)('data/openpipes.db').exec(\"VACUUM INTO 'backup.db'\")"
 ```
 
-下の node ワンライナー(`VACUUM INTO`)は動作確認済みです。サーバーを止めてからファイルをコピーしてもかまいませんが、その場合は `data/openpipes.db-wal` と `-shm` も一緒にコピーしてください。
+下の node ワンライナー(`VACUUM INTO`)は稼働中でも動くことを確認済みです。出力先が既にあるとエラーになるので、`openpipes-$(date +%F).db` のような名前にしてください。サーバーを止めてからファイルをコピーしてもかまいませんが、その場合は `data/openpipes.db-wal` と `-shm` も一緒にコピーしてください。
+
+戻せることまで確かめておくと安心です。`OPENPIPES_DB=/path/to/backup.db PORT=3001 node server.js` で起動して、パイプが載っていることを見てから止めてください(`sessions` も同じファイルに入っているので、古いバックアップに戻すと全員ログインし直しになります)。
+
+`OPENPIPES_DB` に相対パスを書くとプロセスのカレントディレクトリ基準で解決され、親ディレクトリも黙って作られます。systemd などから起動すると意図しない場所に空のデータベースができ、**エラーも出ないままパイプが消えたように見える**ので、本番では絶対パスにしてください。
 
 ## 使い方
 
@@ -143,7 +149,7 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 | GET | `/api/pipes` | パイプ一覧 `[{ id, name, savedAt, readOnly }]`(自分のパイプが savedAt 降順、その後にデモ) |
 | POST | `/api/pipes` | body `{ id?, name, modules, wires }` → 保存して `{ id }` を返す。`id` 無しなら新規作成、`id` 付きは更新なのでデモは 403、自分のものでない id は 404 |
 | GET | `/api/pipes/:id` | パイプの JSON + `readOnly`(存在しない・自分のものでなければ 404 `{error}`) |
-| DELETE | `/api/pipes/:id` | `{ ok: true }`(デモは 403) |
+| DELETE | `/api/pipes/:id` | `{ ok: true }`(デモは 403)。存在しない id や他人の id でも 200 を返します(冪等な削除。他人のパイプの有無を漏らさないため)。消えたかどうかは直後の `GET` か一覧で確認してください |
 | GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で素の JSON、`?format=jsonfeed` で JSON Feed 1.1)。`format` 以外のクエリはパイプパラメータになる。認証不要 |
 | GET | `/api/config` | `{ readOnly, auth, user }`(常に認証不要)。`auth` は `none` / `basic` / `google`、`user` は Google ログイン中のみ `{ name, email, picture }` |
 | GET | `/auth/google/login` | Google ログイン開始(`?return_to=<パス>`)。Google モードのみ、他モードでは 404 |
@@ -199,12 +205,31 @@ Google アカウントでログインさせ、**ユーザーごとにパイプ�
 ### Google Cloud Console での準備
 
 1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作る(既にあるならそれで可)
-2. 「API とサービス」→「OAuth 同意画面」を設定する(外部/内部、アプリ名、サポートメール。スコープは `openid` `email` `profile` だけです)
-3. 「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ アプリケーションの種類は**ウェブ アプリケーション**
-4. 「承認済みのリダイレクト URI」に `<OPENPIPES_BASE_URL>/auth/google/callback` を**完全一致**で登録する(例: `https://pipes.example.com/auth/google/callback`)
-5. 発行されたクライアント ID とクライアント シークレットを環境変数に入れる
+2. 「API とサービス」→「OAuth 同意画面」を設定する(アプリ名、サポートメール。スコープは `openid` `email` `profile` だけです)
+3. **同意画面の公開ステータスとテストユーザーを決める**(ここが一番の落とし穴。下記)
+4. 「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ アプリケーションの種類は**ウェブ アプリケーション**
+5. 「承認済みのリダイレクト URI」に `<OPENPIPES_BASE_URL>/auth/google/callback` を**完全一致**で登録する(例: `https://pipes.example.com/auth/google/callback`)
+6. 発行されたクライアント ID とクライアント シークレットを環境変数に入れる
 
-手元で試すだけなら、Google は `http://localhost:3000/auth/google/callback` のような **localhost の http** リダイレクト URI を受け付けるので、`OPENPIPES_BASE_URL=http://localhost:3000` で構いません。
+#### 公開ステータスとテストユーザー
+
+同意画面は作った直後は「テスト中」で、**テストユーザーに追加したアカウントしかログインできません**。自分自身も追加が必要です。追加していないアカウントでログインしようとすると Google 側で弾かれ、OpenPipes には「Google からエラーが返されました: access_denied」としか出ません。設定は合っているのに入れない、という状況の大半はこれです。
+
+個人の Gmail アカウントで作ったプロジェクトでは「内部」を選べません(Google Workspace 組織のアカウントだけです)。自分以外にも使わせるなら「本番」に切り替えてください。OpenPipes が要求する `openid` `email` `profile` は機微スコープではないので通常は審査なしで公開できますが、承認済みドメインの登録や所有権の確認を求められることがあります。Console の表示に従ってください。
+
+#### リダイレクト URI の完全一致
+
+スキーム(http / https)・ホスト名・ポート番号・パス・末尾スラッシュのどれか 1 文字でも違うと `redirect_uri_mismatch` になります。しかもこのエラーは **Google の画面に出るだけでサーバーのログには何も残りません**(ログが無いから設定は正しい、と誤診しやすいところです)。
+
+登録する文字列は推測せず、実際にサーバーが Google に送る値をそのままコピーしてください。
+
+```sh
+curl -s -o /dev/null -D - http://localhost:3000/auth/google/login | grep -i '^location:'
+```
+
+`Location:` の中の `redirect_uri=` がその文字列です(URL エンコードされているので戻して読んでください)。`curl -I` は HEAD リクエストになり、このサーバーは GET しか受け付けないので全パス 404 になります。使わないでください。
+
+`http` が使えるのは **localhost と 127.0.0.1 だけ**です。手元で試すなら `OPENPIPES_BASE_URL=http://localhost:3000` で構いませんが、LAN の IP・社内ホスト名・本番ドメインはすべて https が必須で、http のままでは Console 側が登録を拒否します。
 
 ### 環境変数
 
@@ -225,6 +250,8 @@ node server.js
 
 3 つのうち一部しか設定されていない場合は、どの変数が足りないかを表示して起動を拒否します。
 
+クライアント シークレットをコマンドラインに直書きすると、シェルの履歴・`ps` の出力・`/proc/<pid>/environ` に残ります。本番では `chmod 600` したファイルに置いて、systemd なら `EnvironmentFile=` で読ませてください。リポジトリには入れないこと。漏れた場合は Console でローテートしてサーバーを再起動します(環境変数は起動時にしか読みません)。シークレットが使われるのはログイン時のトークンエンドポイントだけで、OpenPipes はリフレッシュトークンを持ちません。
+
 ### 誰がログインできるか
 
 `OPENPIPES_ALLOWED_USERS` が**未設定なら、Google アカウントを持つ誰でもログインできます**(起動時にその旨を表示します)。制限するときはカンマ区切りで、メールアドレスかドメインを書きます。
@@ -235,6 +262,34 @@ OPENPIPES_ALLOWED_USERS='alice@example.com, @example.com'
 
 `@example.com` はそのドメインの全員という意味です。大文字小文字は区別しません。照合には id_token の**確認済み**メールアドレスを使うので、`email_verified` が false のアカウントは許可リストに一致しても入れません。
 
+**公開ホストに出すなら設定してください。** 未設定は「Google アカウントを持つ世界中の誰でもログインでき、あなたのサーバーにパイプを保存できる」という意味です。パイプの取得先はサーバーが読みに行くので、放置すると他人のフィード取得の踏み台にもなります。
+
+### 動作確認
+
+本物の Google を用意する前に、同梱の偽プロバイダでログイン一式を試せます。リポジトリの**外**に次の 1 ファイルを置いて起動してください。
+
+```js
+// ~/tmp/op-verify/issuer.mjs
+import { startFakeIssuer } from 'file:///path/to/OpenPipes/test/fake-issuer.mjs';
+const issuer = await startFakeIssuer({ clientId: 'test', clientSecret: 'test-secret' });
+if (process.env.USER_JSON) issuer.setUser(JSON.parse(process.env.USER_JSON));
+console.log(issuer.issuer);
+```
+
+```sh
+USER_JSON='{"sub":"u1","email":"you@example.com","email_verified":true,"name":"テスト"}' node ~/tmp/op-verify/issuer.mjs &
+# 表示された URL を OPENPIPES_OIDC_ISSUER に渡す
+OPENPIPES_GOOGLE_CLIENT_ID=test OPENPIPES_GOOGLE_CLIENT_SECRET=test-secret \
+OPENPIPES_BASE_URL=http://127.0.0.1:3000 \
+OPENPIPES_OIDC_ISSUER=http://127.0.0.1:<偽 issuer のポート> \
+OPENPIPES_DB=~/tmp/op-verify/t.db \
+node server.js
+```
+
+ブラウザで `http://127.0.0.1:3000`(`OPENPIPES_BASE_URL` と同じ表記で)を開けばログイン画面から一周できます。`USER_JSON` を変えて issuer を再起動すれば別ユーザーになるので、パイプが互いに見えないことも確認できます。`OPENPIPES_ALLOWED_USERS` を設定して許可外のアドレスで弾かれるところまで、ここで見ておけます。
+
+`npm test` と `npm run test:e2e` も同じ偽プロバイダを使ってログイン往復・ユーザー分離・CSRF・ログアウトまで自動で確認します。
+
 ### 覚えておくこと
 
 - `OPENPIPES_BASE_URL` は**ブラウザで実際に使う URL** でなければなりません。書き込み系リクエストの `Origin` ヘッダをこの値と比較する CSRF 対策が入っているため、別のホスト名でアクセスすると保存が 403 になります
@@ -242,7 +297,9 @@ OPENPIPES_ALLOWED_USERS='alice@example.com, @example.com'
 - セッションは 30 日で切れます(延長はしません)。Cookie は `HttpOnly` / `SameSite=Lax`、`OPENPIPES_BASE_URL` が https なら `Secure` も付きます。データベースに入るのは Cookie の値そのものではなく SHA-256 なので、データベースを持ち出しても使えるログイン状態にはなりません
 - **パイプはユーザーごとに完全に分かれます**。一覧にも出ず、id を直接指定しても 404 です。ただし公開フィード `/pipes/<id>/run` は誰でも読めます — id を知っていることが読める資格なので、**id は秘密として扱ってください**
 - Loop から呼べるサブパイプも、そのパイプの持ち主のものと組み込みデモだけです
-- モードを切り替えると、ログイン無しで動かしていたときの `local` ユーザーのパイプは見えなくなります(消えるわけではなく、Google モードでは別の持ち主として扱われます)
+- ユーザーの同一性は id_token の `sub` で決まり、メールアドレスでは決まりません。メールアドレスを変えてもパイプは残りますが、Google 側で `sub` が変わる状況(アカウントを消して作り直した等)では別人扱いになり、一覧が空になります(データベースには残っています)。逆に `OPENPIPES_ALLOWED_USERS` はメールアドレスで照合するので、メールを変えると急にログインできなくなることがあります
+- モードを切り替えると、ログイン無しで動かしていたときの `local` ユーザーのパイプは見えなくなります(消えるわけではなく、Google モードでは別の持ち主として扱われます)。引き継ぎたい場合は `UPDATE pipes SET owner_id = '<新しいユーザー id>' WHERE owner_id = 'local'` のようにデータベースを直接書き換えるしかありません(ユーザー id は `SELECT id, email FROM users` で分かります)
+- 認証まわりでサーバーが出すログは `login <ユーザー id>` と `logout <ユーザー id>` の 2 行だけです。トークン・認可コード・Cookie・メールアドレスはログに出しません
 - 実際の Google を相手にした確認は、本物のクライアント ID を用意して一度やってみてください。テストは偽のプロバイダを相手にしているので、Google 固有の挙動までは保証できません
 
 ## テスト
