@@ -143,8 +143,13 @@ Loop は、入力アイテム 1 件ごとに保存済みパイプを実行しま
 | POST | `/api/pipes` | body `{ id?, name, modules, wires }` → 保存して `{ id }` を返す。`id` 無しなら新規作成、`id` 付きは更新なのでデモは 403、自分のものでない id は 404 |
 | GET | `/api/pipes/:id` | パイプの JSON + `readOnly`(存在しない・自分のものでなければ 404 `{error}`) |
 | DELETE | `/api/pipes/:id` | `{ ok: true }`(デモは 403) |
-| GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で素の JSON、`?format=jsonfeed` で JSON Feed 1.1)。`format` 以外のクエリはパイプパラメータになる |
-| GET | `/api/config` | `{ readOnly, authRequired }`(常に認証不要) |
+| GET | `/pipes/:id/run` | 保存済みパイプを実行して RSS 2.0(`?format=json` で素の JSON、`?format=jsonfeed` で JSON Feed 1.1)。`format` 以外のクエリはパイプパラメータになる。認証不要 |
+| GET | `/api/config` | `{ readOnly, auth, user }`(常に認証不要)。`auth` は `none` / `basic` / `google`、`user` は Google ログイン中のみ `{ name, email, picture }` |
+| GET | `/auth/google/login` | Google ログイン開始(`?return_to=<パス>`)。Google モードのみ、他モードでは 404 |
+| GET | `/auth/google/callback` | Google からの戻り先。失敗時は JSON ではなく HTML のエラーページ |
+| POST | `/auth/logout` | セッションを破棄して 204。Google モードのみ |
+
+`/api/*` は未ログインだと 401 を返します(Basic 認証時は `WWW-Authenticate` 付き、Google ログイン時は付けずに `{"error":"Sign in required"}`)。読み取り専用インスタンスへの書き込み、デモの上書き・削除は 403、他人のパイプは存在しないものとして 404 です。
 
 ## デモパイプ
 
@@ -185,6 +190,59 @@ OPENPIPES_PASSWORD=秘密 OPENPIPES_READONLY=1 node server.js
 パスワードを設定しても、**公開フィード `/pipes/<id>/run` と同梱デモ `/demo/*.xml` は認証不要のまま**です。前者は RSS リーダーがログインできないため、後者は相対 URL を使うパイプでサーバーが自分自身から取得するためで、ここを閉じると機能そのものが壊れます。エディタ本体と残りの `/api/*` は認証の内側に入ります。
 
 読み取り専用のときはエディタの「保存」ボタンと読み込みメニューの複製・削除ボタンが消えます。
+
+## Google ログイン
+
+Google アカウントでログインさせ、**ユーザーごとにパイプを分ける**モードです。環境変数を設定すると有効になります。Basic 認証(`OPENPIPES_PASSWORD`)との併用はできず、両方設定すると起動時にエラーで止まります。
+
+### Google Cloud Console での準備
+
+1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクトを作る(既にあるならそれで可)
+2. 「API とサービス」→「OAuth 同意画面」を設定する(外部/内部、アプリ名、サポートメール。スコープは `openid` `email` `profile` だけです)
+3. 「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ アプリケーションの種類は**ウェブ アプリケーション**
+4. 「承認済みのリダイレクト URI」に `<OPENPIPES_BASE_URL>/auth/google/callback` を**完全一致**で登録する(例: `https://pipes.example.com/auth/google/callback`)
+5. 発行されたクライアント ID とクライアント シークレットを環境変数に入れる
+
+手元で試すだけなら、Google は `http://localhost:3000/auth/google/callback` のような **localhost の http** リダイレクト URI を受け付けるので、`OPENPIPES_BASE_URL=http://localhost:3000` で構いません。
+
+### 環境変数
+
+| 変数 | 内容 |
+|------|------|
+| `OPENPIPES_GOOGLE_CLIENT_ID` | OAuth クライアント ID。これかシークレットのどちらかを設定すると Google モードになります |
+| `OPENPIPES_GOOGLE_CLIENT_SECRET` | クライアント シークレット(PKCE を使っていても Google はトークンエンドポイントで要求します) |
+| `OPENPIPES_BASE_URL` | 公開 URL。Google モードでは必須 |
+| `OPENPIPES_ALLOWED_USERS` | 任意。ログインできるアカウントの制限(下記) |
+| `OPENPIPES_OIDC_ISSUER` | 既定 `https://accounts.google.com`。他の OpenID Connect プロバイダも使えます(画面の文言は Google のままです) |
+
+```sh
+OPENPIPES_GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com \
+OPENPIPES_GOOGLE_CLIENT_SECRET=yyy \
+OPENPIPES_BASE_URL=https://pipes.example.com \
+node server.js
+```
+
+3 つのうち一部しか設定されていない場合は、どの変数が足りないかを表示して起動を拒否します。
+
+### 誰がログインできるか
+
+`OPENPIPES_ALLOWED_USERS` が**未設定なら、Google アカウントを持つ誰でもログインできます**(起動時にその旨を表示します)。制限するときはカンマ区切りで、メールアドレスかドメインを書きます。
+
+```sh
+OPENPIPES_ALLOWED_USERS='alice@example.com, @example.com'
+```
+
+`@example.com` はそのドメインの全員という意味です。大文字小文字は区別しません。照合には id_token の**確認済み**メールアドレスを使うので、`email_verified` が false のアカウントは許可リストに一致しても入れません。
+
+### 覚えておくこと
+
+- `OPENPIPES_BASE_URL` は**ブラウザで実際に使う URL** でなければなりません。書き込み系リクエストの `Origin` ヘッダをこの値と比較する CSRF 対策が入っているため、別のホスト名でアクセスすると保存が 403 になります
+- リバースプロキシの下では、`OPENPIPES_BASE_URL` に公開 URL を、`OPENPIPES_HOST=127.0.0.1` に待ち受けアドレスを設定します
+- セッションは 30 日で切れます(延長はしません)。Cookie は `HttpOnly` / `SameSite=Lax`、`OPENPIPES_BASE_URL` が https なら `Secure` も付きます。データベースに入るのは Cookie の値そのものではなく SHA-256 なので、データベースを持ち出しても使えるログイン状態にはなりません
+- **パイプはユーザーごとに完全に分かれます**。一覧にも出ず、id を直接指定しても 404 です。ただし公開フィード `/pipes/<id>/run` は誰でも読めます — id を知っていることが読める資格なので、**id は秘密として扱ってください**
+- Loop から呼べるサブパイプも、そのパイプの持ち主のものと組み込みデモだけです
+- モードを切り替えると、ログイン無しで動かしていたときの `local` ユーザーのパイプは見えなくなります(消えるわけではなく、Google モードでは別の持ち主として扱われます)
+- 実際の Google を相手にした確認は、本物のクライアント ID を用意して一度やってみてください。テストは偽のプロバイダを相手にしているので、Google 固有の挙動までは保証できません
 
 ## テスト
 

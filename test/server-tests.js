@@ -6,6 +6,8 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { startFakeIssuer } from './fake-issuer.mjs';
+
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 const tests = [];
@@ -64,6 +66,82 @@ async function expectBootFailure(env, pattern) {
   assert.match(log.join(''), pattern);
 }
 
+// One provider for the whole file. It has to be closed after the runner loop
+// or an open listener would keep the process alive and `npm test` would hang
+// on success.
+const issuer = await startFakeIssuer({ clientId: 'test', clientSecret: 'test-secret' });
+
+const googleEnv = (port, extra = {}) => ({
+  OPENPIPES_GOOGLE_CLIENT_ID: 'test',
+  OPENPIPES_GOOGLE_CLIENT_SECRET: 'test-secret',
+  OPENPIPES_BASE_URL: `http://127.0.0.1:${port}`,
+  OPENPIPES_OIDC_ISSUER: issuer.issuer,
+  ...extra,
+});
+
+// Walks the whole round trip by hand — login redirect, the provider's
+// authorize, the callback — and hands back the session cookie, so a test that
+// just needs a signed-in user can have one in one line.
+async function login(origin, claims) {
+  if (claims) issuer.setUser(claims);
+  const start = await fetch(`${origin}/auth/google/login?return_to=/?pipe=demo-merged`,
+    { redirect: 'manual' });
+  assert.equal(start.status, 302);
+  const authorizeUrl = start.headers.get('location');
+  assert.ok(authorizeUrl.startsWith(issuer.issuer + '/authorize?'), authorizeUrl);
+  assert.match(authorizeUrl, /code_challenge_method=S256/);
+  assert.match(authorizeUrl, /scope=openid%20email%20profile/);
+  const oauth = start.headers.getSetCookie().find((c) => c.startsWith('openpipes_oauth='));
+  assert.ok(oauth, 'the login-flow cookie carries state, nonce and the PKCE verifier');
+
+  const bounced = await fetch(authorizeUrl, { redirect: 'manual' });
+  assert.equal(bounced.status, 302, await bounced.text());
+  const callbackUrl = bounced.headers.get('location');
+  assert.ok(callbackUrl.startsWith(`${origin}/auth/google/callback?`), callbackUrl);
+
+  const done = await fetch(callbackUrl,
+    { redirect: 'manual', headers: { cookie: oauth.split(';')[0] } });
+  assert.equal(done.status, 302, await done.text());
+  assert.equal(done.headers.get('location'), `${origin}/?pipe=demo-merged`,
+    'return_to must survive the round trip');
+  const cookies = done.headers.getSetCookie();
+  const session = cookies.find((c) => c.startsWith('openpipes_session='));
+  assert.ok(session, cookies.join(' | '));
+  assert.match(session, /HttpOnly/);
+  assert.match(session, /SameSite=Lax/);
+  assert.match(session, /Max-Age=2592000/);
+  assert.equal(/Secure/.test(session), false, 'no Secure over plain http');
+  assert.ok(cookies.some((c) => c.startsWith('openpipes_oauth=') && /Max-Age=0/.test(c)),
+    'the login-flow cookie must be cleared by the callback');
+  return session.split(';')[0];
+}
+
+// A pipe that actually produces an item, so it can be published as a feed.
+const FEED_PIPE = (name) => ({
+  name,
+  modules: [
+    { id: 'm1', type: 'item_builder', params: { fields: [{ name: 'title', value: name }] }, x: 0, y: 0 },
+    { id: 'm2', type: 'output', params: {}, x: 0, y: 0 },
+  ],
+  wires: [{ id: 'w1', from: { module: 'm1', port: 'out' }, to: { module: 'm2', port: 'in' } }],
+});
+
+// item_builder -> loop(<id>) -> output
+const LOOP_PIPE = (name, pipeId) => ({
+  name,
+  modules: [
+    { id: 'm1', type: 'item_builder', params: { fields: [{ name: 'title', value: 'seed' }] }, x: 0, y: 0 },
+    { id: 'm2', type: 'loop', params: { pipe: pipeId, mode: 'replace', limit: 5 }, x: 0, y: 0 },
+    { id: 'm3', type: 'output', params: {}, x: 0, y: 0 },
+  ],
+  wires: [
+    { id: 'w1', from: { module: 'm1', port: 'out' }, to: { module: 'm2', port: 'in' } },
+    { id: 'w2', from: { module: 'm2', port: 'out' }, to: { module: 'm3', port: 'in' } },
+  ],
+});
+
+const withCookie = (cookie, extra = {}) => ({ cookie, ...extra });
+
 const basic = (user, pass) =>
   ({ authorization: 'Basic ' + Buffer.from(`${user}:${pass}`).toString('base64') });
 
@@ -85,7 +163,7 @@ test('no password: everything is reachable, as a local run expects', () =>
     const { id } = await saved.json();
     assert.equal((await fetch(`${origin}/api/pipes/${id}`, { method: 'DELETE' })).status, 200);
     const config = await (await fetch(`${origin}/api/config`)).json();
-    assert.deepEqual(config, { readOnly: false, authRequired: false });
+    assert.deepEqual(config, { readOnly: false, auth: 'none', user: null });
   }));
 
 // ---------------------------------------------------------------------- port
@@ -149,7 +227,7 @@ test('with a password: published feeds and demo assets stay public', () =>
     assert.match(await feed.text(), /<rss/);
     assert.equal((await fetch(`${origin}/demo/tech.xml`)).status, 200);
     const config = await (await fetch(`${origin}/api/config`)).json();
-    assert.deepEqual(config, { readOnly: false, authRequired: true });
+    assert.deepEqual(config, { readOnly: false, auth: 'basic', user: null });
   }));
 
 test('with a password: a pipe with a relative URL still resolves its own assets', () =>
@@ -403,6 +481,244 @@ test('OPENPIPES_BASE_URL may carry a trailing slash', () =>
     assert.match(body.match(/<link>([^<]+)<\/link>/)[1], /^http:\/\/localhost:\d+\/pipes\//);
   }));
 
+// ------------------------------------------------------------ google login
+
+test('google: an unauthenticated visitor gets the page but not the API', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    // the editor and its assets are served: the gate is rendered client-side
+    assert.equal((await fetch(`${origin}/`)).status, 200);
+    assert.equal((await fetch(`${origin}/editor.js`)).status, 200);
+    assert.deepEqual(await (await fetch(`${origin}/api/config`)).json(),
+      { readOnly: false, auth: 'google', user: null });
+
+    const modules = await fetch(`${origin}/api/modules`);
+    assert.equal(modules.status, 401);
+    assert.equal(modules.headers.get('www-authenticate'), null,
+      'a Basic prompt would be wrong here');
+    assert.equal((await modules.json()).error, 'Sign in required');
+    assert.equal((await fetch(`${origin}/api/pipes`)).status, 401);
+    assert.equal((await fetch(`${origin}/api/run`, {
+      method: 'POST', headers: asJSON, body: '{"pipe":{"name":"x","modules":[],"wires":[]}}',
+    })).status, 401);
+
+    // public routes stay public: an RSS client cannot log in
+    assert.equal((await fetch(`${origin}/pipes/demo-tech-filter/run`)).status, 200);
+    assert.equal((await fetch(`${origin}/demo/tech.xml`)).status, 200);
+    assert.equal((await fetch(`${origin}/auth/google/login`, { redirect: 'manual' })).status, 302);
+  }));
+
+test('google: the round trip signs you in', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const cookie = await login(origin, { sub: 'round-trip', email: 'rt@example.com', name: 'Round Trip' });
+    const config = await (await fetch(`${origin}/api/config`, { headers: { cookie } })).json();
+    assert.equal(config.auth, 'google');
+    assert.equal(config.user.email, 'rt@example.com');
+    assert.equal(config.user.name, 'Round Trip');
+    assert.equal((await fetch(`${origin}/api/modules`, { headers: { cookie } })).status, 200);
+  }));
+
+test('google: a callback that does not add up is an HTML error page', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const naked = await fetch(`${origin}/auth/google/callback?code=x&state=y`, { redirect: 'manual' });
+    assert.equal(naked.status, 400);
+    assert.match(naked.headers.get('content-type'), /^text\/html/);
+    assert.match(await naked.text(), /ログインに失敗しました/);
+
+    // a real login-flow cookie, but the state that comes back is not its state
+    const start = await fetch(`${origin}/auth/google/login`, { redirect: 'manual' });
+    const oauth = start.headers.getSetCookie()
+      .find((c) => c.startsWith('openpipes_oauth=')).split(';')[0];
+    const wrongState = await fetch(`${origin}/auth/google/callback?code=x&state=not-it`,
+      { redirect: 'manual', headers: { cookie: oauth } });
+    assert.equal(wrongState.status, 400);
+
+    const denied = await fetch(`${origin}/auth/google/callback?error=access_denied`,
+      { redirect: 'manual', headers: { cookie: oauth } });
+    assert.equal(denied.status, 400);
+    assert.match(await denied.text(), /access_denied/);
+  }));
+
+test('google: the login routes do not exist in the other modes', () =>
+  withServer({}, async ({ origin }) => {
+    assert.equal((await fetch(`${origin}/auth/google/login`, { redirect: 'manual' })).status, 404);
+    assert.equal((await fetch(`${origin}/auth/logout`, { method: 'POST' })).status, 404);
+  }));
+
+test('google: two users cannot see each other, but a feed is public', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const a = await login(origin, { sub: 'user-a', email: 'a@example.com', name: 'A' });
+    const mine = await (await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: withCookie(a, asJSON), body: JSON.stringify(FEED_PIPE('A only')),
+    })).json();
+
+    const b = await login(origin, { sub: 'user-b', email: 'b@example.com', name: 'B' });
+    const bList = await (await fetch(`${origin}/api/pipes`, { headers: { cookie: b } })).json();
+    assert.equal(bList.some((p) => p.id === mine.id), false, 'B must not see A pipes');
+    assert.ok(bList.every((p) => p.readOnly), 'all B can see is the demos');
+
+    assert.equal((await fetch(`${origin}/api/pipes/${mine.id}`, { headers: { cookie: b } })).status, 404,
+      'a foreign id must be indistinguishable from a missing one');
+    assert.equal((await fetch(`${origin}/api/pipes/${mine.id}`,
+      { method: 'DELETE', headers: { cookie: b } })).status, 200);
+    assert.equal((await fetch(`${origin}/api/pipes/${mine.id}`, { headers: { cookie: a } })).status, 200,
+      'and that delete must not have touched it');
+    assert.equal((await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: withCookie(b, asJSON),
+      body: JSON.stringify({ id: mine.id, ...FEED_PIPE('stolen') }),
+    })).status, 404);
+    assert.equal((await (await fetch(`${origin}/api/pipes/${mine.id}`,
+      { headers: { cookie: a } })).json()).name, 'A only');
+
+    // the id is the capability: no cookie at all, and the feed answers
+    const feed = await fetch(`${origin}/pipes/${mine.id}/run`);
+    assert.equal(feed.status, 200);
+    assert.match(await feed.text(), /A only/);
+  }));
+
+test('google: a Loop only reaches its own owner pipes', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const a = await login(origin, { sub: 'loop-a', email: 'a@example.com', name: 'A' });
+    const sub = await (await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: withCookie(a, asJSON), body: JSON.stringify(FEED_PIPE('sub pipe')),
+    })).json();
+
+    const b = await login(origin, { sub: 'loop-b', email: 'b@example.com', name: 'B' });
+    const run = async (cookie) => (await fetch(`${origin}/api/run`, {
+      method: 'POST', headers: withCookie(cookie, asJSON),
+      body: JSON.stringify({ pipe: LOOP_PIPE('borrowed', sub.id) }),
+    })).json();
+
+    const asB = await run(b);
+    assert.equal(asB.items.length, 0, 'nothing of A may come out');
+    assert.equal(asB.errors.length, 1);
+    assert.equal(asB.errors[0].module, 'm2');
+    assert.match(asB.errors[0].message, /Pipe not found/);
+
+    const asA = await run(a);
+    assert.deepEqual(asA.errors, []);
+    assert.equal(asA.items.length, 1);
+    assert.equal(asA.items[0].title, 'sub pipe');
+  }));
+
+test('google: the demos belong to everyone and to nobody', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const a = await login(origin, { sub: 'demo-a', email: 'a@example.com' });
+    const b = await login(origin, { sub: 'demo-b', email: 'b@example.com' });
+    for (const cookie of [a, b]) {
+      const list = await (await fetch(`${origin}/api/pipes`, { headers: { cookie } })).json();
+      assert.ok(list.find((p) => p.id === 'demo-merged').readOnly);
+    }
+    assert.equal((await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: withCookie(a, asJSON),
+      body: JSON.stringify({ id: 'demo-merged', ...FEED_PIPE('x') }),
+    })).status, 403);
+    assert.equal((await fetch(`${origin}/api/pipes/demo-merged`,
+      { method: 'DELETE', headers: { cookie: a } })).status, 403);
+
+    // duplicating one is just a save without an id, and the copy is yours alone
+    const demo = await (await fetch(`${origin}/api/pipes/demo-merged`, { headers: { cookie: a } })).json();
+    const copy = await (await fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers: withCookie(a, asJSON),
+      body: JSON.stringify({ name: demo.name + ' のコピー', modules: demo.modules, wires: demo.wires }),
+    })).json();
+    assert.notEqual(copy.id, 'demo-merged');
+    const aList = await (await fetch(`${origin}/api/pipes`, { headers: { cookie: a } })).json();
+    const bList = await (await fetch(`${origin}/api/pipes`, { headers: { cookie: b } })).json();
+    assert.ok(aList.some((p) => p.id === copy.id));
+    assert.equal(bList.some((p) => p.id === copy.id), false);
+  }));
+
+test('google: logging out ends the session for good', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const cookie = await login(origin, { sub: 'logout-me', email: 'l@example.com' });
+    const out = await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+    assert.equal(out.status, 204);
+    assert.ok(out.headers.getSetCookie().some(
+      (c) => c.startsWith('openpipes_session=') && /Max-Age=0/.test(c)));
+    assert.equal((await fetch(`${origin}/api/pipes`, { headers: { cookie } })).status, 401,
+      'the cookie the browser still holds must be worthless');
+  }));
+
+test('google: cross-site writes are refused', () =>
+  withServer(googleEnv, async ({ origin }) => {
+    const cookie = await login(origin, { sub: 'csrf', email: 'c@example.com' });
+    const post = (headers) => fetch(`${origin}/api/pipes`, {
+      method: 'POST', headers, body: JSON.stringify(FEED_PIPE('csrf')),
+    });
+
+    const evil = await post(withCookie(cookie, { ...asJSON, origin: 'https://evil.example' }));
+    assert.equal(evil.status, 403);
+    assert.match((await evil.json()).error, /Cross-site/);
+    assert.equal((await post(withCookie(cookie, { ...asJSON, origin: 'null' }))).status, 403);
+    assert.equal((await post(withCookie(cookie, { ...asJSON, origin }))).status, 200);
+
+    // a cross-site form cannot set this content type without a preflight
+    const formish = await fetch(`${origin}/api/pipes`, {
+      method: 'POST',
+      headers: withCookie(cookie, { 'content-type': 'text/plain;charset=UTF-8' }),
+      body: JSON.stringify(FEED_PIPE('formish')),
+    });
+    assert.equal(formish.status, 400);
+    assert.match((await formish.json()).error, /Content-Type: application\/json/);
+
+    const loggedOut = await fetch(`${origin}/auth/logout`, {
+      method: 'POST', headers: withCookie(cookie, { origin: 'https://evil.example' }),
+    });
+    assert.equal(loggedOut.status, 403);
+    assert.equal((await fetch(`${origin}/api/pipes`, { headers: { cookie } })).status, 200,
+      'the session must have survived the attempt');
+  }));
+
+test('google: an allowlist keeps everybody else out', () =>
+  withServer((port) => googleEnv(port, { OPENPIPES_ALLOWED_USERS: '@example.com, Bob@gmail.com' }),
+    async ({ origin }) => {
+      const attempt = async (claims) => {
+        issuer.setUser(claims);
+        const start = await fetch(`${origin}/auth/google/login`, { redirect: 'manual' });
+        const oauth = start.headers.getSetCookie()
+          .find((c) => c.startsWith('openpipes_oauth=')).split(';')[0];
+        const bounced = await fetch(start.headers.get('location'), { redirect: 'manual' });
+        return fetch(bounced.headers.get('location'),
+          { redirect: 'manual', headers: { cookie: oauth } });
+      };
+
+      const stranger = await attempt({ sub: 'x1', email: 'alice@other.com' });
+      assert.equal(stranger.status, 403);
+      assert.match(await stranger.text(), /許可されていません/);
+
+      assert.equal((await attempt({ sub: 'x2', email: 'carol@example.com' })).status, 302);
+      assert.equal((await attempt({ sub: 'x3', email: 'bob@GMAIL.com' })).status, 302,
+        'the comparison is case-insensitive');
+      // an unverified address must never satisfy an allowlist
+      assert.equal((await attempt({ sub: 'x4', email: 'carol@example.com', email_verified: false })).status, 403);
+    }));
+
+test('google: an https base URL makes the cookies Secure', () =>
+  // the server still listens on http; only what it hands the browser changes
+  withServer((port) => googleEnv(port, { OPENPIPES_BASE_URL: 'https://pipes.example' }),
+    async ({ origin }) => {
+      const start = await fetch(`${origin}/auth/google/login`, { redirect: 'manual' });
+      assert.equal(start.status, 302);
+      const oauth = start.headers.getSetCookie().find((c) => c.startsWith('openpipes_oauth='));
+      assert.match(oauth, /Secure/);
+      assert.ok(start.headers.get('location').includes(
+        'redirect_uri=' + encodeURIComponent('https://pipes.example/auth/google/callback')));
+    }));
+
+test('google: a half-configured instance refuses to start', async () => {
+  await expectBootFailure({ OPENPIPES_GOOGLE_CLIENT_ID: 'test' },
+    /OPENPIPES_GOOGLE_CLIENT_SECRET/);
+  await expectBootFailure({ OPENPIPES_GOOGLE_CLIENT_SECRET: 'test-secret' },
+    /OPENPIPES_GOOGLE_CLIENT_ID/);
+  await expectBootFailure({
+    OPENPIPES_GOOGLE_CLIENT_ID: 'test', OPENPIPES_GOOGLE_CLIENT_SECRET: 'test-secret',
+  }, /OPENPIPES_BASE_URL/);
+  await expectBootFailure({
+    OPENPIPES_GOOGLE_CLIENT_ID: 'test', OPENPIPES_GOOGLE_CLIENT_SECRET: 'test-secret',
+    OPENPIPES_BASE_URL: 'http://127.0.0.1:9', OPENPIPES_PASSWORD: 'pw',
+  }, /OPENPIPES_PASSWORD/);
+});
+
 // ------------------------------------------------------------- address filter
 
 test('a pipe cannot reach loopback through the run endpoint', () =>
@@ -441,5 +757,9 @@ for (const { name, fn } of tests) {
     failed += 1;
   }
 }
+// Before the exit code is decided: an open listener would keep the process
+// alive and a green run would hang instead of finishing.
+await issuer.close();
+
 console.log(`${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

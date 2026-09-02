@@ -462,7 +462,10 @@ received it.
 | POST   | `/api/pipes`          | body `{ id?, name, modules, wires }` → saves, returns `{ id }`. No `id`: a new pipe is created under a fresh id. An `id`: an **update**, so 403 for a built-in demo (save it as a copy) and 404 for an id that is not yours — including one that does not exist. Rejects (400) modules that aren't objects with string `id`/`type`, duplicate module ids, non-object `params`, and wires without `from`/`to` objects — a pipe the editor cannot render must never be creatable |
 | GET    | `/api/pipes/:id`      | the stored pipe plus `readOnly`, 404 `{error}` if it is missing or somebody else's |
 | DELETE | `/api/pipes/:id`      | `{ ok: true }`; 403 for a built-in demo. Deleting an id you do not own is a no-op, not an error |
-| GET    | `/api/config`         | `{ readOnly, authRequired }` — what the editor needs to know about this instance. Always public |
+| GET    | `/api/config`         | `{ readOnly, auth, user }` — what the editor needs to know about this instance. `auth` is `'none' \| 'basic' \| 'google'`; `user` is `null` except in google mode with a session, where it is `{ name, email, picture }`. Always public: it reads the session cookie without requiring one |
+| GET    | `/auth/google/login`  | google mode only. `?return_to=<path>` → 302 to the provider (or straight back when already signed in) |
+| GET    | `/auth/google/callback` | google mode only. Finishes the login; every failure is an HTML page, not JSON |
+| POST   | `/auth/logout`        | google mode only. Deletes the session, clears the cookie, 204 |
 | GET    | `/pipes/:id/run`      | executes the saved pipe, whoever owns it (the id is the capability) (cached, ETag + 304). `?format=json` → `{ items }`; `?format=jsonfeed` → JSON Feed 1.1 (`application/feed+json`); default (or `format=rss`) → RSS 2.0 (channel title = pipe name, link = request URL). Every **other** query param becomes a pipe param (for `${name}`). Requires exactly one `output` module → else 400. Any module error → 502 `{error}` (JSON). |
 
 ### Feed caching
@@ -481,24 +484,166 @@ is what actually saves an RSS client bandwidth. `Cache-Control: no-cache` on
 the request recomputes. `X-OpenPipes-Cache: hit|miss` says which happened.
 `/api/run` is never cached — the editor's Run must always show current data.
 
-### Access control
+### Modes and access control
 
-Both knobs are off by default, so `node server.js` behaves as it always has.
+There are three auth modes, derived from the environment at boot:
 
-- `OPENPIPES_PASSWORD` (with `OPENPIPES_USER`, default `admin`) requires HTTP
-  Basic auth. Credentials are compared after SHA-256 so the check is over
-  equal-length buffers and does not leak length or prefix by timing.
-- `OPENPIPES_READONLY=1` refuses anything that modifies a stored pipe (`POST
-  /api/pipes`, `DELETE /api/pipes/:id`) with 403, whether or not a password is
-  set. Auth is checked first, so an unauthenticated write gets 401, not 403.
+| mode | when | who the request acts as |
+|---|---|---|
+| `none` | nothing set | the fixed user `local` |
+| `basic` | `OPENPIPES_PASSWORD` set | `local`, once the Basic header checks out |
+| `google` | either `OPENPIPES_GOOGLE_*` set | the signed-in user, from the session cookie |
 
-Two routes are marked `public` and stay reachable without credentials, because
-requiring them would break the feature: `/pipes/:id/run`, which an RSS client
-has no way to authenticate to, and `/demo/*.xml`, which the engine fetches over
-HTTP from itself whenever a pipe uses a relative URL. `/api/config` is public
-too so the editor can render its read-only state before authenticating.
-Everything else — the editor page, its assets, and the rest of `/api/*` — is
-behind the password when one is set.
+| variable | meaning |
+|---|---|
+| `OPENPIPES_DB` | Database file. Default `data/openpipes.db`; `:memory:` accepted. The parent directory is created at boot |
+| `OPENPIPES_GOOGLE_CLIENT_ID` | Turns google mode on, together with the next two |
+| `OPENPIPES_GOOGLE_CLIENT_SECRET` | Google requires it at the token endpoint even with PKCE |
+| `OPENPIPES_BASE_URL` | Public origin, e.g. `https://pipes.example.com`. Required in google mode (the `redirect_uri` must match what is registered exactly) and allowed in any mode. Cookies get `Secure` iff it is https, and the CSRF check compares `Origin` to it, so it must be the origin people actually use |
+| `OPENPIPES_ALLOWED_USERS` | Optional, google mode only. Comma-separated emails (`alice@example.com`) and domains (`@example.com`), matched case-insensitively against the id_token's verified email. Unset means anyone with an account at the provider may sign in, and boot says so |
+| `OPENPIPES_OIDC_ISSUER` | Default `https://accounts.google.com`. Endpoints come from its discovery document; the tests point this at a fake issuer. Any OIDC provider therefore works, though the UI says Google |
+| `OPENPIPES_PASSWORD`, `OPENPIPES_USER` | Basic auth; `OPENPIPES_USER` defaults to `admin`. Credentials are compared after SHA-256 so the check is over equal-length buffers and leaks neither length nor prefix by timing |
+| `OPENPIPES_READONLY` | `1` refuses anything that modifies a stored pipe (`POST /api/pipes`, `DELETE /api/pipes/:id`) with 403, in every mode. Auth is checked first, so an unauthenticated write gets 401, not 403 |
+| `OPENPIPES_CACHE_TTL`, `OPENPIPES_ALLOW_PRIVATE`, `OPENPIPES_HOST`, `PORT` / `SERVER_PORT` | see the sections about each |
+
+The server **refuses to start** (message on stderr naming the variable, exit
+1) when only some of client id / client secret / base URL are set, when google
+mode and `OPENPIPES_PASSWORD` are combined, or when `OPENPIPES_BASE_URL` is
+not a bare http(s) origin. `OPENPIPES_ALLOWED_USERS` outside google mode is
+ignored with a warning.
+
+Routes come in three classes:
+
+- **public** — never authenticates: `/pipes/:id/run`, which an RSS client has
+  no way to authenticate to; `/demo/*.xml`, which the engine fetches over HTTP
+  from itself whenever a pipe uses a relative URL; `/api/config`, so the editor
+  can render before anyone has signed in; and `/auth/*`, which is how you stop
+  being anonymous.
+- **api** — the rest of `/api/*`. Requires a principal and acts as it. Without
+  one: 401 `{"error": "Authentication required"}` with `WWW-Authenticate` in
+  basic mode, 401 `{"error": "Sign in required"}` **without** it in google mode
+  (a Basic prompt there would be a dead end the browser cannot get out of).
+- **page** — the editor and its assets. Behind Basic auth in basic mode; open
+  in none and google mode, where the editor renders its own login gate.
+
+`/auth/*` is registered before the `/.*` static catch-all, or the page handler
+would answer those paths with 404. In none and basic mode the `/auth/*` routes
+are not registered at all, so they 404.
+
+### Users and isolation
+
+Every pipe belongs to one user (see **Stored pipes**). In none and basic mode
+that is always `local`; in google mode it is whoever is signed in, and the
+`local` row is not created — switching an existing instance to google mode
+hides what `local` owns rather than sharing it.
+
+The isolation rule is one line: every statement touching `pipes` carries
+`WHERE owner_id = ?` except the lookup behind `publishedPipe()`, used by
+`/pipes/:id/run` alone. So the **public feed URL is the only path by which one
+user's data reaches another**, and it is deliberate: the id is the capability.
+A Loop is scoped the same way (see the implementation notes below).
+
+### Sessions and login
+
+Google login is OpenID Connect authorization code + PKCE, done entirely
+server-side: no script from Google is loaded in the page, and the editor only
+links to `/auth/google/login`.
+
+`GET /auth/google/login?return_to=<path>`
+1. Already signed in → 302 to the validated `return_to`.
+2. Fresh `state`, `nonce` (16 random bytes each) and PKCE `verifier` (32),
+   `challenge = base64url(sha256(verifier))`.
+3. `return_to` is accepted only if it is a string starting with `/`, not with
+   `//` or `/\`, without CR/LF, at most 2048 characters; otherwise `/`.
+4. Sets `openpipes_oauth`, then 302 to the authorization endpoint with
+   `response_type=code`, `client_id`, `redirect_uri=<BASE_URL>/auth/google/callback`,
+   `scope=openid email profile`, `state`, `nonce`, `code_challenge`,
+   `code_challenge_method=S256`.
+
+`GET /auth/google/callback?code=…&state=…` (or `?error=…`): no
+`openpipes_oauth` cookie or an unparsable one → 400; `error` → 400 naming the
+(escaped) code; `state` unequal to the cookie's (compared with `secretEquals`)
+→ 400; then the token endpoint is called as `application/x-www-form-urlencoded`
+with `grant_type=authorization_code`, `code`, the identical `redirect_uri`,
+`client_id`, `client_secret` and `code_verifier` — a non-2xx answer or one
+without an `id_token` → 502. The `access_token` it returns is not used for
+anything. The id_token is then verified (below) against the cookie's nonce →
+400 on failure; the allowlist is applied when set, requiring
+`email_verified === true` and a match → 403; and finally the user is upserted,
+a session created, `openpipes_session` set, `openpipes_oauth` cleared, `login
+<userId>` logged and the browser sent to `BASE_URL + returnTo`.
+
+`POST /auth/logout` deletes the session row, clears the cookie and answers 204.
+POST rather than GET so an `<img src>` on another site cannot log people out.
+
+**Cookies.** `openpipes_session` carries the raw 32-byte token, base64url,
+with `Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000` (30 days, absolute, not
+sliding) plus `Secure` iff `OPENPIPES_BASE_URL` is https. Lax rather than
+Strict because the callback and deep links arrive as top-level navigations
+from another site. Only `sha256(token)` is stored, so a copied database yields
+no usable cookies; logout deletes the row and sets `Max-Age=0`. A signed
+stateless cookie was rejected: no revocation, and a signing secret to manage,
+while the database is already there. `openpipes_oauth` is
+`base64url(JSON.stringify({ state, nonce, verifier, returnTo }))` with
+`Path=/auth/; HttpOnly; SameSite=Lax; Max-Age=600` (+ `Secure`), cleared by
+the callback. It needs no signature: its values are random and only ever
+compared with what comes back.
+
+**id_token verification** (`verifyIdToken` in `lib/auth.js`, pure and
+synchronous, so it is unit-tested against a generated RSA key). Rejected
+unless all of: three dot-separated parts with JSON-object header and payload;
+`alg === 'RS256'` (never `none`, never `HS256`); the RS256 signature verifies
+against the JWKS key named by `kid`; `iss` equals the discovery document's
+issuer, or that issuer without its scheme (Google historically issued
+`accounts.google.com`); `aud` is the client id or an array containing it;
+`exp` is a number and `exp * 1000 > now - 60000`; `iat`, if present,
+`iat * 1000 < now + 60000`; `nonce` equals the one in the cookie; `sub` is a
+non-empty string.
+
+**Discovery and JWKS.** `<issuer>/.well-known/openid-configuration` is fetched
+lazily on the first login attempt and memoised on success only, so the server
+boots even when the provider is unreachable and a failure does not poison the
+next attempt. The document's `issuer` must equal the configured one (ignoring
+one trailing slash). Keys come from `jwks_uri` as `kid → KeyObject`; an
+unknown `kid` triggers at most one refetch per 60 s — a stream of forged
+tokens must not turn this server into a JWKS-fetching amplifier — and the
+cache is refetched anyway once it is 24 h old. These fetches use the global
+`fetch` with a 15 s timeout, deliberately not `lib/feed.js`'s `fetchURL`: the
+issuer is operator configuration rather than a URL a pipe author chose, and in
+the tests it lives on loopback.
+
+**Error pages.** Because the browser is mid-navigation, `/auth/*` failures are
+HTML: `<title>OpenPipes</title>`, a heading 「ログインに失敗しました」, the
+message, and a link 「← エディタに戻る」 to `/`; everything interpolated is
+escaped. The messages are
+「ログインの状態が見つかりません。もう一度お試しください。」 (no cookie, or a
+state mismatch), 「Google からエラーが返されました: <error>」,
+「トークンの検証に失敗しました。」,
+「このアカウントはこのサーバーでは許可されていません。」 and
+「Google に接続できませんでした。」 (discovery or the token endpoint
+unreachable). `Cache-Control: no-store` on every `/auth/*` response, as on
+`/api/*`.
+
+### CSRF
+
+Cookie authentication means a request can carry authority its sender did not
+choose to give it, so three layers:
+
+- For every request whose method is not `GET`/`HEAD`: when
+  `OPENPIPES_BASE_URL` is set and an `Origin` header is present and is not
+  equal to it, 403 `{"error": "Cross-site request refused"}`. `Origin: null`
+  counts as a mismatch. Checked in `dispatch` before the handler, in every
+  mode; without a base URL there is nothing to compare against and no cookie
+  to abuse either. Browsers send `Origin` on every POST, same-origin included,
+  so the editor's own requests pass as long as people use the base URL.
+- `readJSONBody` requires a `Content-Type` matching
+  `/^application\/json\b/i`, else 400 `Body must be JSON (Content-Type:
+  application/json)`. A cross-site form or a `no-cors` fetch cannot set that
+  without a preflight.
+- `SameSite=Lax` on both cookies.
+
+The server sends no CORS headers in any mode, and must not start: a cross-site
+preflight failing is part of the story above.
 
 Implementation notes: hand-rolled router (method + regex table). JSON bodies
 limited to 1 MB. Pipe ids validated `[a-z0-9-]{1,64}` before any lookup;
@@ -506,8 +651,12 @@ static paths resolved and verified inside their root dir. `Cache-Control:
 no-store` on `/api/*`. Server logs one line per request. On boot, create the
 database's directory if missing, open the store, ensure the `local` user
 exists, purge expired sessions (and hourly after that, on an `unref`ed timer)
-and print the URL and the database path. `SIGINT`/`SIGTERM` close the store
-and exit 0.
+and print the URL, the database path and the auth mode — e.g. `OpenPipes
+listening on http://localhost:3000 (db data/openpipes.db, Google login: anyone
+can sign in)`, or `(…, Google login: allowlist of 3)`, or `(…, auth as
+"admin")` in basic mode. `SIGINT`/`SIGTERM` close the store and exit 0.
+Login logging is `login <userId>` and `logout <userId>` and nothing else:
+tokens, codes, cookies and secrets are never logged.
 
 `baseUrl` passed to the engine, and the origin feed links carry, is
 `OPENPIPES_BASE_URL` when set, else `http://<Host header>` (fallback

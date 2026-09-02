@@ -5,10 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { mkdir, readFile } from 'node:fs/promises';
 
 import { runPipe, catalog, PipeError } from './lib/engine.js';
-import { buildJSONFeed, buildRSS } from './lib/feed.js';
+import { buildJSONFeed, buildRSS, escapeXml } from './lib/feed.js';
 import { httpError } from './lib/errors.js';
 import { openStore, validatePipeBody } from './lib/store.js';
-import { secretEquals } from './lib/auth.js';
+import {
+  OidcClient, createPkce, matchesAllowlist, parseAllowlist, parseCookies, randomToken,
+  safeReturnTo, secretEquals, serializeCookie,
+} from './lib/auth.js';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -74,6 +77,56 @@ const AUTH_USER = process.env.OPENPIPES_USER || 'admin';
 const AUTH_PASSWORD = process.env.OPENPIPES_PASSWORD || '';
 // Refuses to modify stored pipes at all, whether or not a password is set.
 const READ_ONLY = process.env.OPENPIPES_READONLY === '1';
+
+// Google login. Setting either of the first two turns it on, and then all
+// three of client id, secret and base URL are required: the redirect_uri has
+// to match what is registered with Google exactly, so it cannot be guessed
+// from the Host header.
+const GOOGLE_CLIENT_ID = process.env.OPENPIPES_GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.OPENPIPES_GOOGLE_CLIENT_SECRET || '';
+// Any OIDC provider works; the UI says Google because that is what it is for.
+const OIDC_ISSUER = process.env.OPENPIPES_OIDC_ISSUER || 'https://accounts.google.com';
+const ALLOWED_USERS = parseAllowlist(process.env.OPENPIPES_ALLOWED_USERS);
+
+// 'none' | 'basic' | 'google'
+const AUTH_MODE = (() => {
+  if (!GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_SECRET) {
+    if (ALLOWED_USERS.length) {
+      console.warn('OPENPIPES_ALLOWED_USERS is ignored without Google login');
+    }
+    return AUTH_PASSWORD ? 'basic' : 'none';
+  }
+  if (!GOOGLE_CLIENT_ID) return bootFailure('OPENPIPES_GOOGLE_CLIENT_ID is required for Google login');
+  if (!GOOGLE_CLIENT_SECRET) {
+    return bootFailure('OPENPIPES_GOOGLE_CLIENT_SECRET is required for Google login' +
+      ' (Google needs it at the token endpoint even with PKCE)');
+  }
+  if (!BASE_URL) {
+    return bootFailure('OPENPIPES_BASE_URL is required for Google login:' +
+      ' the OAuth redirect_uri must match the one registered with Google');
+  }
+  if (AUTH_PASSWORD) {
+    return bootFailure('OPENPIPES_PASSWORD cannot be combined with Google login;' +
+      ' unset one of them');
+  }
+  return 'google';
+})();
+
+const SESSION_COOKIE = 'openpipes_session';
+const OAUTH_COOKIE = 'openpipes_oauth';
+const SESSION_TTL_MS = 30 * 24 * 3600 * 1000; // absolute, not sliding
+// Only meaningful over https, and setting it over http would make the cookie
+// unusable, so it follows the base URL.
+const COOKIE_SECURE = Boolean(BASE_URL && BASE_URL.startsWith('https:'));
+
+const oidc = AUTH_MODE === 'google'
+  ? new OidcClient({
+    issuer: OIDC_ISSUER,
+    clientId: GOOGLE_CLIENT_ID,
+    clientSecret: GOOGLE_CLIENT_SECRET,
+    redirectUri: BASE_URL + '/auth/google/callback',
+  })
+  : null;
 // A published feed is polled on a timer by every subscriber, and each poll
 // re-fetches every upstream the pipe names. Seconds; 0 disables.
 const CACHE_TTL_SECONDS = (() => {
@@ -136,6 +189,33 @@ function requireWritable() {
   if (READ_ONLY) throw httpError(403, 'This OpenPipes instance is read-only');
 }
 
+// Who is asking, or null. Never throws, so /api/config can call it to decide
+// whether to show a signed-in user without demanding one.
+function principalOf(req) {
+  try {
+    if (AUTH_MODE === 'google') {
+      const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+      const user = token ? store.sessionUser(token) : null;
+      return user ? { userId: user.id, user } : null;
+    }
+    if (AUTH_MODE === 'basic') requireAuth(req);
+    // With no login there is one owner, and it is whoever reached the server.
+    return { userId: LOCAL_USER, user: null };
+  } catch {
+    return null;
+  }
+}
+
+function requirePrincipal(req) {
+  const principal = principalOf(req);
+  if (principal) return principal;
+  // A Basic prompt would be nonsense in Google mode: the browser cannot
+  // satisfy it, and the editor knows to show its login gate on a 401.
+  if (AUTH_MODE === 'google') throw httpError(401, 'Sign in required');
+  throw httpError(401, 'Authentication required',
+    { 'WWW-Authenticate': 'Basic realm="OpenPipes", charset="UTF-8"' });
+}
+
 function sendJSON(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(body));
@@ -173,6 +253,11 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
 }
 
 async function readJSONBody(req) {
+  // Also a CSRF layer: a cross-site form or a no-cors fetch cannot set this
+  // content type without a preflight, which this server never answers.
+  if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+    throw httpError(400, 'Body must be JSON (Content-Type: application/json)');
+  }
   const text = await readBody(req);
   try {
     return JSON.parse(text);
@@ -213,9 +298,14 @@ async function handleModules(req, res) {
   sendJSON(res, 200, catalog());
 }
 
-// What the editor needs to know about how this instance is configured.
+// What the editor needs to know about how this instance is configured. There
+// is no user concept in none/basic mode, so `user` stays null there.
 async function handleConfig(req, res) {
-  sendJSON(res, 200, { readOnly: READ_ONLY, authRequired: Boolean(AUTH_PASSWORD) });
+  const principal = AUTH_MODE === 'google' ? principalOf(req) : null;
+  const user = principal && principal.user
+    ? { name: principal.user.name, email: principal.user.email, picture: principal.user.picture }
+    : null;
+  sendJSON(res, 200, { readOnly: READ_ONLY, auth: AUTH_MODE, user });
 }
 
 async function handleRunAdHoc(req, res) {
@@ -227,29 +317,29 @@ async function handleRunAdHoc(req, res) {
     params: body.params || {},
     baseUrl: baseUrlOf(req),
     allowPrivate: ALLOW_PRIVATE,
-    loadPipe: loaderFor(LOCAL_USER), // the Loop module runs a saved pipe per item
+    loadPipe: loaderFor(req.principal.userId), // the Loop module runs a saved pipe per item
   });
   sendJSON(res, 200, result);
 }
 
 async function handleListPipes(req, res) {
-  sendJSON(res, 200, store.listPipes(LOCAL_USER));
+  sendJSON(res, 200, store.listPipes(req.principal.userId));
 }
 
 async function handleSavePipe(req, res) {
   const body = await readJSONBody(req);
   validatePipeBody(body);
-  sendJSON(res, 200, store.savePipe(LOCAL_USER, body));
+  sendJSON(res, 200, store.savePipe(req.principal.userId, body));
 }
 
 async function handleGetPipe(req, res, match) {
-  const pipe = store.getPipe(match[1], LOCAL_USER);
+  const pipe = store.getPipe(match[1], req.principal.userId);
   if (!pipe) throw httpError(404, 'Pipe not found: ' + match[1]);
   sendJSON(res, 200, pipe);
 }
 
 async function handleDeletePipe(req, res, match) {
-  store.deletePipe(match[1], LOCAL_USER);
+  store.deletePipe(match[1], req.principal.userId);
   sendJSON(res, 200, { ok: true });
 }
 
@@ -335,6 +425,136 @@ async function handleRunSaved(req, res, match, url) {
   sendFeed(req, res, entry, 'miss');
 }
 
+/* ---------- login ---------- */
+
+// The browser is mid-navigation when any of this goes wrong, so an error is a
+// page, not JSON. Everything interpolated is escaped; nothing from the query
+// string is ever reflected raw.
+function authErrorPage(res, status, message) {
+  const body = `<!DOCTYPE html>
+<html lang="ja"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenPipes</title>
+<style>body{font:16px/1.7 system-ui,sans-serif;margin:0;display:grid;place-items:center;
+min-height:100vh;background:#f5f7fa;color:#1f2937}
+main{background:#fff;border:1px solid #d5dbe3;border-radius:10px;padding:32px 36px;max-width:32em}
+h1{font-size:1.25rem;margin:0 0 12px}a{color:#2f80ed}</style>
+</head><body><main>
+<h1>ログインに失敗しました</h1>
+<p>${escapeXml(message)}</p>
+<p><a href="/">← エディタに戻る</a></p>
+</main></body></html>
+`;
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(body);
+}
+
+const LOGIN_MESSAGES = {
+  noState: 'ログインの状態が見つかりません。もう一度お試しください。',
+  badToken: 'トークンの検証に失敗しました。',
+  notAllowed: 'このアカウントはこのサーバーでは許可されていません。',
+  unreachable: 'Google に接続できませんでした。',
+};
+
+function redirectTo(res, location) {
+  res.writeHead(302, { Location: location });
+  res.end();
+}
+
+const cookieOptions = (path, maxAge) =>
+  ({ path, httpOnly: true, sameSite: 'Lax', maxAge, secure: COOKIE_SECURE });
+
+async function handleGoogleLogin(req, res, match, url) {
+  const returnTo = safeReturnTo(url.searchParams.get('return_to'));
+  if (principalOf(req)) return redirectTo(res, BASE_URL + returnTo);
+
+  const state = randomToken(16);
+  const nonce = randomToken(16);
+  const { verifier, challenge } = createPkce();
+  let authorizeUrl;
+  try {
+    authorizeUrl = await oidc.authorizationUrl({ state, nonce, challenge });
+  } catch (err) {
+    console.error('login: ' + err.message);
+    return authErrorPage(res, 502, LOGIN_MESSAGES.unreachable);
+  }
+  // No signature needed: every value in here is random and is only ever
+  // compared with what comes back.
+  const payload = Buffer.from(JSON.stringify({ state, nonce, verifier, returnTo }))
+    .toString('base64url');
+  res.setHeader('Set-Cookie', [serializeCookie(OAUTH_COOKIE, payload, cookieOptions('/auth/', 600))]);
+  redirectTo(res, authorizeUrl);
+}
+
+async function handleGoogleCallback(req, res, match, url) {
+  let saved = null;
+  try {
+    const raw = parseCookies(req.headers.cookie)[OAUTH_COOKIE];
+    if (raw) saved = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8'));
+  } catch { /* an unparsable cookie is the same as no cookie */ }
+  if (!saved || typeof saved !== 'object') {
+    return authErrorPage(res, 400, LOGIN_MESSAGES.noState);
+  }
+
+  const providerError = url.searchParams.get('error');
+  if (providerError) {
+    return authErrorPage(res, 400, `Google からエラーが返されました: ${providerError}`);
+  }
+  if (!secretEquals(url.searchParams.get('state') || '', saved.state || '')) {
+    return authErrorPage(res, 400, LOGIN_MESSAGES.noState);
+  }
+
+  let claims;
+  try {
+    const tokens = await oidc.exchangeCode({
+      code: url.searchParams.get('code') || '',
+      verifier: saved.verifier || '',
+    });
+    claims = await oidc.verify(tokens.id_token, saved.nonce);
+  } catch (err) {
+    const unreachable = err && err.status === 502;
+    console.error('login: ' + err.message);
+    return authErrorPage(res, unreachable ? 502 : 400,
+      unreachable ? LOGIN_MESSAGES.unreachable : LOGIN_MESSAGES.badToken);
+  }
+
+  // An unverified address must never satisfy an allowlist: anyone can claim
+  // one at a provider that does not check.
+  if (ALLOWED_USERS.length &&
+      (claims.email_verified !== true || !matchesAllowlist(claims.email, ALLOWED_USERS))) {
+    return authErrorPage(res, 403, LOGIN_MESSAGES.notAllowed);
+  }
+
+  const user = store.upsertUser({
+    provider: 'google',
+    subject: claims.sub,
+    email: claims.email,
+    name: claims.name,
+    picture: claims.picture,
+  });
+  const token = store.createSession(user.id, SESSION_TTL_MS);
+  console.log(`login ${user.id}`);
+  res.setHeader('Set-Cookie', [
+    serializeCookie(SESSION_COOKIE, token, cookieOptions('/', SESSION_TTL_MS / 1000)),
+    serializeCookie(OAUTH_COOKIE, '', cookieOptions('/auth/', 0)),
+  ]);
+  redirectTo(res, BASE_URL + safeReturnTo(saved.returnTo));
+}
+
+// POST, not GET: an <img src> on another site must not be able to log people
+// out. The Origin check in dispatch applies to it for the same reason.
+async function handleLogout(req, res) {
+  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  if (token) {
+    const user = store.sessionUser(token);
+    store.deleteSession(token);
+    if (user) console.log(`logout ${user.id}`);
+  }
+  res.setHeader('Set-Cookie', [serializeCookie(SESSION_COOKIE, '', cookieOptions('/', 0))]);
+  res.writeHead(204);
+  res.end();
+}
+
 async function handleDemoFile(req, res, match) {
   await serveFile(res, DEMO_DIR, match[1]);
 }
@@ -344,21 +564,33 @@ async function handleStatic(req, res, match) {
   await serveFile(res, PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname.slice(1));
 }
 
-// `public` routes stay reachable without credentials: a published feed has to
-// be readable by an RSS client, and the engine fetches /demo/*.xml over HTTP
-// from itself when a pipe uses a relative URL.
-// `writes` routes are the ones read-only mode refuses.
+// Three classes of route.
+//   public — never authenticates. A published feed has to be readable by an
+//            RSS client, the engine fetches /demo/*.xml over HTTP from itself
+//            when a pipe uses a relative URL, the editor needs /api/config
+//            before it can render anything, and the login routes are how you
+//            stop being anonymous in the first place.
+//   api    — needs a principal, and acts as that principal.
+//   page   — the editor and its assets: behind Basic auth in basic mode, open
+//            in none and google mode, where the editor renders its own gate.
+// `writes` routes are the ones read-only mode refuses, after the auth check.
 const ROUTES = [
-  { method: 'GET', pattern: /^\/api\/config$/, handler: handleConfig, public: true },
-  { method: 'GET', pattern: /^\/api\/modules$/, handler: handleModules },
-  { method: 'POST', pattern: /^\/api\/run$/, handler: handleRunAdHoc },
-  { method: 'GET', pattern: /^\/api\/pipes$/, handler: handleListPipes },
-  { method: 'POST', pattern: /^\/api\/pipes$/, handler: handleSavePipe, writes: true },
-  { method: 'GET', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleGetPipe },
-  { method: 'DELETE', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleDeletePipe, writes: true },
-  { method: 'GET', pattern: /^\/pipes\/([^/]+)\/run$/, handler: handleRunSaved, public: true },
-  { method: 'GET', pattern: /^\/demo\/([^/]+\.xml)$/, handler: handleDemoFile, public: true },
-  { method: 'GET', pattern: /^\/.*$/, handler: handleStatic },
+  { method: 'GET', pattern: /^\/api\/config$/, handler: handleConfig, auth: 'public' },
+  { method: 'GET', pattern: /^\/api\/modules$/, handler: handleModules, auth: 'api' },
+  { method: 'POST', pattern: /^\/api\/run$/, handler: handleRunAdHoc, auth: 'api' },
+  { method: 'GET', pattern: /^\/api\/pipes$/, handler: handleListPipes, auth: 'api' },
+  { method: 'POST', pattern: /^\/api\/pipes$/, handler: handleSavePipe, auth: 'api', writes: true },
+  { method: 'GET', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleGetPipe, auth: 'api' },
+  { method: 'DELETE', pattern: /^\/api\/pipes\/([^/]+)$/, handler: handleDeletePipe, auth: 'api', writes: true },
+  // ...before the /.* catch-all, or the page handler would answer these with 404
+  ...(AUTH_MODE === 'google' ? [
+    { method: 'GET', pattern: /^\/auth\/google\/login$/, handler: handleGoogleLogin, auth: 'public' },
+    { method: 'GET', pattern: /^\/auth\/google\/callback$/, handler: handleGoogleCallback, auth: 'public' },
+    { method: 'POST', pattern: /^\/auth\/logout$/, handler: handleLogout, auth: 'public' },
+  ] : []),
+  { method: 'GET', pattern: /^\/pipes\/([^/]+)\/run$/, handler: handleRunSaved, auth: 'public' },
+  { method: 'GET', pattern: /^\/demo\/([^/]+\.xml)$/, handler: handleDemoFile, auth: 'public' },
+  { method: 'GET', pattern: /^\/.*$/, handler: handleStatic, auth: 'page' },
 ];
 
 async function dispatch(req, res) {
@@ -370,13 +602,29 @@ async function dispatch(req, res) {
     throw httpError(400, 'Malformed request path');
   }
   if (pathname.includes('\0')) throw httpError(400, 'Malformed request path');
-  if (pathname.startsWith('/api/')) res.setHeader('Cache-Control', 'no-store');
+  if (pathname.startsWith('/api/') || pathname.startsWith('/auth/')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+
+  // CSRF: cookies mean a request can now carry authority the sender did not
+  // choose to give it. Browsers send Origin on every POST, same-origin ones
+  // included, so this costs the editor nothing as long as people reach the
+  // server by its base URL. Without a base URL there is nothing to compare to,
+  // and there are no cookies to abuse either.
+  if (BASE_URL && req.method !== 'GET' && req.method !== 'HEAD') {
+    const origin = req.headers.origin;
+    // `Origin: null` (a sandboxed frame, a data: document) is a mismatch.
+    if (origin !== undefined && origin !== BASE_URL) {
+      throw httpError(403, 'Cross-site request refused');
+    }
+  }
 
   for (const route of ROUTES) {
     if (route.method !== req.method) continue;
     const match = pathname.match(route.pattern);
     if (!match) continue;
-    if (!route.public) requireAuth(req);
+    if (route.auth === 'api') req.principal = requirePrincipal(req);
+    else if (route.auth === 'page' && AUTH_MODE === 'basic') requireAuth(req);
     if (route.writes) requireWritable();
     await route.handler(req, res, match, url);
     return;
@@ -439,6 +687,11 @@ server.on('error', (err) => {
 });
 server.listen({ port: PORT, host: HOST }, () => {
   const notes = [`db ${dbLabel()}`];
+  if (AUTH_MODE === 'google') {
+    notes.push('Google login: ' + (ALLOWED_USERS.length
+      ? `allowlist of ${ALLOWED_USERS.length}`
+      : 'anyone can sign in'));
+  }
   if (AUTH_PASSWORD) notes.push(`auth as "${AUTH_USER}"`);
   if (READ_ONLY) notes.push('read-only');
   if (ALLOW_PRIVATE) notes.push('private addresses allowed');
