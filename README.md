@@ -184,4 +184,4 @@ npm run test:e2e
 
 `test/e2e/run.mjs` が専用ポートでサーバーを起動し、ヘッドレス Chromium を CDP で操作して実際に配置・結線・実行・Undo/Redo・保存/削除を行い、終了時に後片付けします。保存先は一時ディレクトリなので `data/pipes/` は汚れません。Chromium が PATH に無い場合は `CHROME_BIN` を指定してください。Node.js 22 以上が必要です(グローバル `WebSocket` を使うため)。
 
-GitHub Actions では master への push と Pull Request のたびに、ユニットテストを Node.js 18 / 20 / 22 / 24 で、ブラウザテストを Node.js 24 で実行します(`.github/workflows/test.yml`)。
+GitHub Actions では main への push と Pull Request のたびに、ユニットテストを Node.js 18 / 20 / 22 / 24 で、ブラウザテストを Node.js 24 で実行します(`.github/workflows/test.yml`)。
