@@ -13,7 +13,7 @@ Yahoo! Pipes クローンです。ブラウザ上のビジュアルエディタ�
 node server.js
 ```
 
-ブラウザで http://localhost:3000 を開きます。ポートは環境変数で変更できます: `PORT=8080 node server.js`
+ブラウザで http://localhost:3000 を開きます。ポートは環境変数で変更できます: `PORT=8080 node server.js`。`PORT` が無ければ Pterodactyl 系のホスティングパネルが渡す `SERVER_PORT` を読み、どちらも無ければ 3000 です。待ち受けアドレスは既定で全インターフェースですが、前段にリバースプロキシがあるホスティングでループバックだけに閉じたいときは `OPENPIPES_HOST=127.0.0.1` を設定します。
 
 ## 使い方
 

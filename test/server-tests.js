@@ -18,13 +18,15 @@ function test(name, fn) {
 let nextPort = 24000 + (process.pid % 1000) * 10;
 
 // Starts an instance with its own throwaway data directory, seeded with the
-// demo pipes so the fixtures are the ones the app ships.
+// demo pipes so the fixtures are the ones the app ships. `env` may be a
+// function of the chosen port, for tests about how the port itself is picked.
 async function withServer(env, body) {
   const dataDir = await mkdtemp(path.join(tmpdir(), 'openpipes-http-'));
   await cp(path.join(ROOT, 'data', 'pipes'), dataDir, { recursive: true });
   const port = nextPort++;
+  const extra = typeof env === 'function' ? env(port) : env;
   const child = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
-    env: { ...process.env, PORT: String(port), OPENPIPES_DATA: dataDir, ...env },
+    env: { ...process.env, PORT: String(port), OPENPIPES_DATA: dataDir, ...extra },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const log = [];
@@ -71,6 +73,26 @@ test('no password: everything is reachable, as a local run expects', () =>
     assert.equal((await fetch(`${origin}/api/pipes/${id}`, { method: 'DELETE' })).status, 200);
     const config = await (await fetch(`${origin}/api/config`)).json();
     assert.deepEqual(config, { readOnly: false, authRequired: false });
+  }));
+
+// ---------------------------------------------------------------------- port
+
+test('SERVER_PORT is honoured when PORT is unset, as Pterodactyl panels export it', () =>
+  withServer((port) => ({ PORT: '', SERVER_PORT: String(port) }), async ({ origin }) => {
+    assert.equal((await fetch(`${origin}/api/config`)).status, 200);
+  }));
+
+test('PORT wins over SERVER_PORT when both are set', () =>
+  // withServer only talks to PORT; if SERVER_PORT won, nothing would answer there
+  withServer((port) => ({ SERVER_PORT: String(port + 1000) }), async ({ origin }) => {
+    assert.equal((await fetch(`${origin}/api/config`)).status, 200);
+  }));
+
+test('OPENPIPES_HOST binds to that address only', () =>
+  withServer({ OPENPIPES_HOST: '127.0.0.1' }, async ({ origin }) => {
+    assert.equal((await fetch(`${origin}/api/config`)).status, 200);
+    // the IPv6 loopback is not bound (on a host without IPv6 this fails for that reason instead)
+    await assert.rejects(fetch(origin.replace('127.0.0.1', '[::1]') + '/api/config'));
   }));
 
 // ---------------------------------------------------------------------- auth

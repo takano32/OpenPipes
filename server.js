@@ -15,7 +15,13 @@ const PIPES_DIR = process.env.OPENPIPES_DATA
   ? path.resolve(process.env.OPENPIPES_DATA)
   : path.join(ROOT, 'data', 'pipes');
 
-const PORT = Number(process.env.PORT) || 3000;
+// PORT is the usual knob. SERVER_PORT is what Pterodactyl-style hosting panels
+// export for the one allocation a container gets, so it serves as a fallback.
+const PORT = Number(process.env.PORT) || Number(process.env.SERVER_PORT) || 3000;
+// Where to bind. Unset means every interface, which a local run and a plain
+// container both want. A host that fronts the app with its own proxy can ask
+// for loopback only (OPENPIPES_HOST=127.0.0.1).
+const HOST = process.env.OPENPIPES_HOST || undefined;
 // Pipes fetch URLs chosen by whoever saved them, so non-public addresses are
 // refused unless the operator opts in (a LAN-only deployment aggregating an
 // intranet feed is a legitimate reason to).
@@ -448,11 +454,11 @@ server.on('error', (err) => {
   console.error(`Failed to start: ${err.message}`);
   process.exit(1);
 });
-server.listen(PORT, () => {
+server.listen({ port: PORT, host: HOST }, () => {
   const notes = [];
   if (AUTH_PASSWORD) notes.push(`auth as "${AUTH_USER}"`);
   if (READ_ONLY) notes.push('read-only');
   if (ALLOW_PRIVATE) notes.push('private addresses allowed');
-  console.log(`OpenPipes listening on http://localhost:${PORT}` +
+  console.log(`OpenPipes listening on http://${HOST || 'localhost'}:${PORT}` +
     (notes.length ? ` (${notes.join(', ')})` : ''));
 });
